@@ -1,0 +1,73 @@
+# =============================================================================
+# Project Scolecite — .gitignore
+# =============================================================================
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+*.whl
+
+# ---- Virtual Environment ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Database ----
+*.db
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+backups/
+
+# ---- Secrets & Environment ----
+.env
+.env.local
+.env.production
+!.env.example
+
+# ---- Logs ----
+*.log
+logs/
+
+# ---- IDE / Editor ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# ---- Build & Packaging ----
+*.spec
+*.exe
+*.msi
+
+# ---- Testing ----
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.pyright/
+
+# ---- Misc ----
+repomix-output.xml
+*.bak
+*.tmp
+trading-bot/

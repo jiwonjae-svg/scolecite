@@ -1,0 +1,52 @@
+# =============================================================================
+# Project Scolecite - AI Trading Bot
+# DISCLAIMER: For educational/research purposes only.
+# The authors are NOT responsible for any financial losses.
+# =============================================================================
+
+# --- Server (FastAPI) ---
+fastapi>=0.115.6
+uvicorn[standard]>=0.34.0
+sse-starlette>=2.2.1
+pydantic>=2.10.4
+pydantic-settings>=2.7.1
+
+# --- Database ---
+sqlalchemy>=2.0.36
+aiosqlite>=0.20.0
+asyncpg>=0.30.0
+greenlet>=3.1.1
+
+# --- AI Clients ---
+anthropic>=0.42.0
+openai>=1.58.1            # xAI Grok uses OpenAI-compatible API
+
+# --- Broker & Market Data ---
+alpaca-trade-api>=3.2.0
+websockets>=10.0,<11.0
+
+# --- HTTP & Resilience ---
+httpx>=0.28.1
+tenacity>=9.0.0
+
+# --- Data & Analysis ---
+pandas>=2.2.3
+numpy>=2.2.1
+ta>=0.11.0                # Technical Analysis library
+
+# --- Charting ---
+matplotlib>=3.10.0
+
+# --- Desktop UI ---
+customtkinter>=5.2.2
+Pillow>=11.1.0
+
+# --- Logging & Utils ---
+python-dotenv>=1.0.1
+structlog>=24.4.0
+orjson>=3.10.13
+
+# --- Testing ---
+pytest==8.3.4
+pytest-asyncio==0.25.0
+
