@@ -30,6 +30,7 @@ from typing import Any, Optional
 import customtkinter as ctk
 import httpx
 import matplotlib
+import pytz
 
 matplotlib.use("Agg")  # non-interactive backend
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -178,7 +179,18 @@ class TradingBotApp(ctk.CTk):
         self._selected_chart_symbol: Optional[str] = None
         self._chat_history: list[dict] = []
 
+        # Throttle / efficient-render state
+        self._last_chart_draw: float = 0.0
+        self._chart_throttle_s: float = 1.5
+        self._chart_redraw_pending: bool = False
+        self._chart_dirty: bool = False
+        self._chart_lines: dict[str, Any] = {}
+        self._pending_sse_updates: list[tuple[str, dict]] = []
+        self._sse_flush_scheduled: bool = False
+        self._ui_throttle_ms: int = 150
+
         self._build_ui()
+        self.after(500, self._check_sidebar_scroll)
         self._start_sse()
         self._poll_status()
 
@@ -260,9 +272,16 @@ class TradingBotApp(ctk.CTk):
         sidebar.grid(row=0, column=0, sticky="ns", padx=(0, PAD), pady=(0, 0))
         sidebar.grid_propagate(False)
 
-        # Scrollable container
-        scroll = ctk.CTkScrollableFrame(sidebar, fg_color="transparent", width=260)
-        scroll.pack(fill="both", expand=True)
+        # Scrollable container (scrollbar auto-hides when content fits)
+        scroll = ctk.CTkScrollableFrame(
+            sidebar, fg_color="transparent", width=260,
+            scrollbar_button_color=BG_PRIMARY,
+            scrollbar_button_hover_color=BG_HOVER,
+        )
+        scroll.pack(fill="both", expand=True, pady=(32, 0))
+        self._sidebar_scroll = scroll
+        scroll._scrollbar.grid_remove()  # hidden by default
+        scroll.bind("<Configure>", lambda e: self._check_sidebar_scroll())
 
         # --- Connection status card ---
         conn_card = _card(scroll)
@@ -373,10 +392,27 @@ class TradingBotApp(ctk.CTk):
         sym_card.pack(fill="x", pady=(0, PAD))
         _heading(sym_card, text="Universe").pack(
             anchor="w", padx=PAD, pady=(PAD, 6))
-        self._symbols_label = _label(
-            sym_card, text="Loading…", font=FONT_MONO_SM,
-            text_color=ACCENT_CYAN, wraplength=250)
-        self._symbols_label.pack(anchor="w", padx=PAD, pady=(0, PAD))
+        self._universe_frame = ctk.CTkFrame(sym_card, fg_color="transparent")
+        self._universe_frame.pack(fill="x", padx=PAD, pady=(0, PAD))
+        self._universe_buttons: list[ctk.CTkButton] = []
+        _label(self._universe_frame, text="Loading…", font=FONT_MONO_SM,
+               text_color=TEXT_SECONDARY).pack(anchor="w")
+
+    def _check_sidebar_scroll(self) -> None:
+        """Show scrollbar only when sidebar content overflows."""
+        try:
+            canvas = self._sidebar_scroll._parent_canvas
+            canvas.update_idletasks()
+            bbox = canvas.bbox("all")
+            if bbox:
+                content_h = bbox[3] - bbox[1]
+                visible_h = canvas.winfo_height()
+                if content_h > visible_h:
+                    self._sidebar_scroll._scrollbar.grid()
+                else:
+                    self._sidebar_scroll._scrollbar.grid_remove()
+        except Exception:
+            pass
 
     # ---- MAIN CONTENT (TabView) ----
     def _build_main_content(self, parent: ctk.CTkFrame) -> None:
@@ -397,12 +433,14 @@ class TradingBotApp(ctk.CTk):
         tab_chat = tabs.add("  AI Chat  ")
         tab_journal = tabs.add("  Journal  ")
         tab_logs = tabs.add("  Full Logs  ")
+        tab_settings = tabs.add("  ⚙ Settings  ")
 
         self._build_tab_overview(tab_overview)
         self._build_tab_strategy(tab_strategy)
         self._build_tab_chat(tab_chat)
         self._build_tab_journal(tab_journal)
         self._build_tab_logs(tab_logs)
+        self._build_tab_settings(tab_settings)
 
     # ── Overview tab ──
     def _build_tab_overview(self, tab: ctk.CTkFrame) -> None:
@@ -420,11 +458,36 @@ class TradingBotApp(ctk.CTk):
         hdr.grid(row=0, column=0, sticky="ew", padx=PAD, pady=(PAD, 4))
         _heading(hdr, text="Real-time Market Data").pack(side="left")
 
+        # Ticker search bar with autocomplete
+        search_wrapper = ctk.CTkFrame(hdr, fg_color="transparent")
+        search_wrapper.pack(side="left", padx=(16, 0))
+        self._ticker_search_var = ctk.StringVar()
+        self._ticker_search_entry = ctk.CTkEntry(
+            search_wrapper, textvariable=self._ticker_search_var,
+            width=120, height=26, font=FONT_MONO_SM,
+            placeholder_text="Search ticker…",
+            fg_color=BG_INPUT, border_color=BORDER_SUBTLE,
+            text_color=TEXT_PRIMARY,
+        )
+        self._ticker_search_entry.pack(side="left")
+        self._ticker_search_entry.bind("<KeyRelease>", self._on_ticker_search)
+        self._ticker_search_entry.bind("<Return>", self._on_ticker_search_select)
+        self._ticker_search_entry.bind("<FocusOut>",
+                                        lambda e: self.after(200, self._hide_ticker_dropdown))
+
+        # Dropdown listbox for search results (hidden by default)
+        self._ticker_dropdown = ctk.CTkFrame(
+            chart_card, fg_color=BG_WIDGET, corner_radius=6,
+            border_width=1, border_color=BORDER_SUBTLE,
+        )
+        self._ticker_dropdown_buttons: list[ctk.CTkButton] = []
+        # Will be placed with .place() when results appear
+
         # Multi-timeframe selector
         tf_frame = ctk.CTkFrame(hdr, fg_color="transparent")
         tf_frame.pack(side="right")
         self._tf_buttons: dict[str, ctk.CTkButton] = {}
-        for tf in ["1min", "5min", "15min", "1h", "1d", "1w"]:
+        for tf in ["1min", "5min", "15min", "1h", "1d", "1w", "1mo", "1y"]:
             btn = ctk.CTkButton(
                 tf_frame, text=tf, width=48, height=24, corner_radius=4,
                 fg_color=BG_INPUT if tf != "1h" else "#2b3a42",
@@ -677,6 +740,744 @@ class TradingBotApp(ctk.CTk):
 
         self._log_entry_count = 0
 
+    # ── Settings tab ──
+    def _build_tab_settings(self, tab: ctk.CTkFrame) -> None:
+        tab.grid_rowconfigure(0, weight=1)
+        tab.grid_columnconfigure(0, weight=1)
+
+        # Outer scroll in case window is small
+        outer = ctk.CTkScrollableFrame(
+            tab, fg_color="transparent",
+            scrollbar_button_color=BG_PRIMARY,
+            scrollbar_button_hover_color=BG_HOVER,
+        )
+        outer.pack(fill="both", expand=True, padx=4, pady=4)
+
+        self._settings_edit_mode = False
+        self._settings_fields: dict[str, Any] = {}
+
+        # ── Header row ──
+        hdr = ctk.CTkFrame(outer, fg_color="transparent")
+        hdr.pack(fill="x", pady=(0, 10))
+        _heading(hdr, text="⚙  Environment Settings").pack(side="left")
+
+        # Sync indicator
+        self._sync_indicator = ctk.CTkLabel(
+            hdr, text="●  Server Synced", font=FONT_MONO_SM,
+            text_color=ACCENT_GREEN)
+        self._sync_indicator.pack(side="right", padx=(0, 8))
+
+        # ── Action buttons ──
+        btn_bar = ctk.CTkFrame(outer, fg_color="transparent")
+        btn_bar.pack(fill="x", pady=(0, 12))
+
+        self._settings_edit_btn = ctk.CTkButton(
+            btn_bar, text="🔓 Edit Mode", width=120, height=32,
+            corner_radius=6, fg_color="#2b3a42", hover_color="#334950",
+            text_color=ACCENT_CYAN, font=("Pretendard", 11, "bold"),
+            command=self._toggle_settings_edit,
+        )
+        self._settings_edit_btn.pack(side="left", padx=(0, 6))
+
+        self._settings_save_btn = ctk.CTkButton(
+            btn_bar, text="💾 Save & Apply", width=130, height=32,
+            corner_radius=6, fg_color="#1b4332", hover_color="#2d6a4f",
+            text_color=ACCENT_GREEN, font=("Pretendard", 11, "bold"),
+            command=self._save_settings, state="disabled",
+        )
+        self._settings_save_btn.pack(side="left", padx=(0, 6))
+
+        self._settings_reset_btn = ctk.CTkButton(
+            btn_bar, text="↺ Reset to Default", width=140, height=32,
+            corner_radius=6, fg_color="#3b1219", hover_color="#5c1a27",
+            text_color=ACCENT_RED, font=("Pretendard", 11, "bold"),
+            command=self._reset_settings, state="disabled",
+        )
+        self._settings_reset_btn.pack(side="left")
+
+        # ──────────────────────────────────────────────────────────────
+        # SECTION 1: Trading Mode
+        # ──────────────────────────────────────────────────────────────
+        s1 = _card(outer)
+        s1.pack(fill="x", pady=(0, 10))
+        _heading(s1, text="Trading Mode").pack(anchor="w", padx=PAD, pady=(PAD, 6))
+
+        mode_row = ctk.CTkFrame(s1, fg_color="transparent")
+        mode_row.pack(fill="x", padx=PAD, pady=(0, PAD))
+        _label(mode_row, text="Paper (simulated)  /  Live (real money)",
+               font=FONT_SMALL, text_color=TEXT_SECONDARY).pack(side="left")
+
+        self._mode_switch_var = ctk.StringVar(value="paper")
+        self._mode_switch = ctk.CTkSegmentedButton(
+            mode_row, values=["paper", "live"], width=180, height=30,
+            font=("JetBrains Mono", 11, "bold"),
+            fg_color=BG_INPUT, selected_color="#2b3a42",
+            selected_hover_color="#334950",
+            unselected_color=BG_INPUT, unselected_hover_color=BG_HOVER,
+            text_color=TEXT_PRIMARY,
+            variable=self._mode_switch_var, state="disabled",
+        )
+        self._mode_switch.pack(side="right")
+        self._settings_fields["trading_mode"] = self._mode_switch_var
+
+        # ──────────────────────────────────────────────────────────────
+        # SECTION 2: Risk Management
+        # ──────────────────────────────────────────────────────────────
+        s2 = _card(outer)
+        s2.pack(fill="x", pady=(0, 10))
+        _heading(s2, text="Risk Management").pack(anchor="w", padx=PAD, pady=(PAD, 6))
+
+        risk_fields = [
+            ("max_position_percent", "Max Position Size (%)", 0.1, 100.0),
+            ("max_drawdown_percent", "Max Drawdown (%)", 0.1, 100.0),
+            ("daily_loss_limit_percent", "Daily Loss Limit (%)", 0.1, 100.0),
+            ("daily_ai_budget_usd", "Daily AI Budget ($)", 0.01, 100000.0),
+            ("consecutive_stop_loss_pause", "Stop-Loss → Pause (count)", 1, 100),
+            ("vix_panic_threshold", "VIX Panic Threshold", 1.0, 100.0),
+        ]
+        for key, label_text, lo, hi in risk_fields:
+            self._add_number_field(s2, key, label_text, lo, hi)
+
+        # ──────────────────────────────────────────────────────────────
+        # SECTION 2b: AI Adaptive Stop-Loss
+        # ──────────────────────────────────────────────────────────────
+        s2b = _card(outer)
+        s2b.pack(fill="x", pady=(0, 10))
+        _heading(s2b, text="AI Adaptive Stop-Loss").pack(
+            anchor="w", padx=PAD, pady=(PAD, 6))
+        _label(s2b, text="AI uses ATR-based stop-loss instead of fixed %.",
+               font=FONT_SMALL, text_color=TEXT_SECONDARY).pack(
+            anchor="w", padx=PAD, pady=(0, 4))
+
+        self._add_toggle_field(s2b, "enable_adaptive_stoploss",
+                               "Enable Adaptive Stop-Loss")
+        self._add_number_field(s2b, "adaptive_stoploss_hard_cap_pct",
+                               "Hard Cap — Max Stop-Loss (%)", 0.5, 50.0)
+
+        # ──────────────────────────────────────────────────────────────
+        # SECTION 3: AI Model Pairing
+        # ──────────────────────────────────────────────────────────────
+        s3 = _card(outer)
+        s3.pack(fill="x", pady=(0, 10))
+        _heading(s3, text="AI Model Pairing").pack(anchor="w", padx=PAD, pady=(PAD, 6))
+
+        # Display name → API model ID mapping
+        self._ai_model_map: dict[str, str] = {
+            "Grok 4.1 Fast": "grok-3-fast",
+            "Grok 4.2": "grok-3",
+            "Claude Haiku 4.5": "claude-haiku-4-5-20250514",
+            "Claude Opus 4.6": "claude-opus-4-20250514",
+        }
+        self._ai_model_reverse: dict[str, str] = {
+            v: k for k, v in self._ai_model_map.items()
+        }
+        model_display_names = list(self._ai_model_map.keys())
+
+        ai_roles = [
+            ("ai_model_scan", "Data Scan (Fast)"),
+            ("ai_model_strategy", "Strategy Brainstorm"),
+            ("ai_model_ceo", "CEO Decision Maker"),
+        ]
+        for key, label_text in ai_roles:
+            self._add_dropdown_field(s3, key, label_text, model_display_names)
+
+        # ──────────────────────────────────────────────────────────────
+        # SECTION 4: Ticker Universe
+        # ──────────────────────────────────────────────────────────────
+        s4 = _card(outer)
+        s4.pack(fill="x", pady=(0, 10))
+        _heading(s4, text="Ticker Universe").pack(anchor="w", padx=PAD, pady=(PAD, 6))
+
+        dyn_row = ctk.CTkFrame(s4, fg_color="transparent")
+        dyn_row.pack(fill="x", padx=PAD, pady=(0, 6))
+        _label(dyn_row, text="Dynamic Universe (Grok auto-select)",
+               font=FONT_SMALL, text_color=TEXT_SECONDARY).pack(side="left")
+        self._dyn_universe_var = ctk.StringVar(value="on")
+        self._dyn_universe_switch = ctk.CTkSwitch(
+            dyn_row, text="", variable=self._dyn_universe_var,
+            onvalue="on", offvalue="off",
+            fg_color=BG_INPUT, progress_color=ACCENT_CYAN,
+            button_color=TEXT_SECONDARY, button_hover_color=TEXT_PRIMARY,
+            state="disabled",
+            command=self._on_dynamic_universe_toggle,
+        )
+        self._dyn_universe_switch.pack(side="right")
+        self._settings_fields["enable_dynamic_universe"] = self._dyn_universe_var
+
+        self._add_number_field(s4, "dynamic_universe_size",
+                               "Universe Size (tickers)", 1, 100)
+
+        ticker_row = ctk.CTkFrame(s4, fg_color="transparent")
+        ticker_row.pack(fill="x", padx=PAD, pady=(0, PAD))
+        _label(ticker_row, text="Fixed Tickers (comma-separated)",
+               font=FONT_SMALL, text_color=TEXT_SECONDARY).pack(anchor="w")
+        self._fixed_tickers_entry = ctk.CTkEntry(
+            ticker_row, placeholder_text="AAPL, TSLA, NVDA",
+            font=FONT_MONO, fg_color=BG_INPUT, text_color=TEXT_PRIMARY,
+            border_color=BORDER_SUBTLE, corner_radius=6, height=32,
+            state="disabled",
+        )
+        self._fixed_tickers_entry.pack(fill="x", pady=(4, 0))
+        self._settings_fields["fixed_tickers"] = self._fixed_tickers_entry
+
+        _label(s4, text="Universe Filtering (applied by Opus CEO)",
+               font=FONT_SMALL, text_color=ACCENT_CYAN).pack(
+            anchor="w", padx=PAD, pady=(8, 4))
+        self._add_number_field(s4, "universe_min_market_cap_usd",
+                               "Min Market Cap ($)", 0, 1e15)
+        self._add_number_field(s4, "universe_min_volume_usd",
+                               "Min Daily Volume ($)", 0, 1e12)
+
+        # ──────────────────────────────────────────────────────────────
+        # SECTION 5: Chart Settings
+        # ──────────────────────────────────────────────────────────────
+        s5 = _card(outer)
+        s5.pack(fill="x", pady=(0, 10))
+        _heading(s5, text="Chart Settings").pack(anchor="w", padx=PAD, pady=(PAD, 6))
+
+        tf_options = ["1min", "5min", "15min", "1h", "1d", "1w", "1mo", "1y"]
+        self._add_dropdown_field(s5, "default_chart_timeframe",
+                                 "Default Timeframe", tf_options)
+        self._add_number_field(s5, "default_candle_count",
+                               "Candle Count", 10, 1000)
+
+        # ──────────────────────────────────────────────────────────────
+        # SECTION 6: Timezone
+        # ──────────────────────────────────────────────────────────────
+        s6 = _card(outer)
+        s6.pack(fill="x", pady=(0, 10))
+        _heading(s6, text="Display Timezone").pack(anchor="w", padx=PAD, pady=(PAD, 6))
+
+        tz_row = ctk.CTkFrame(s6, fg_color="transparent")
+        tz_row.pack(fill="x", padx=PAD, pady=(0, PAD))
+        _label(tz_row, text="Timezone", font=FONT_SMALL,
+               text_color=TEXT_SECONDARY).pack(side="left")
+
+        # Full list stored for validation; dropdown shows curated common set
+        self._all_timezones = sorted(pytz.common_timezones)
+        _common_tz = [
+            "US/Eastern", "US/Central", "US/Mountain", "US/Pacific",
+            "UTC", "Europe/London", "Europe/Berlin", "Europe/Paris",
+            "Europe/Moscow", "Asia/Tokyo", "Asia/Seoul", "Asia/Shanghai",
+            "Asia/Hong_Kong", "Asia/Singapore", "Asia/Kolkata",
+            "Asia/Dubai", "Australia/Sydney", "Pacific/Auckland",
+            "America/New_York", "America/Chicago", "America/Denver",
+            "America/Los_Angeles", "America/Sao_Paulo", "America/Toronto",
+            "Africa/Johannesburg", "Africa/Cairo",
+        ]
+        # Ensure all common ones are valid pytz zones
+        tz_display = [z for z in _common_tz if z in self._all_timezones]
+
+        self._tz_var = ctk.StringVar(value="Asia/Seoul")
+        self._tz_combo = ctk.CTkComboBox(
+            tz_row, values=tz_display, variable=self._tz_var,
+            width=260, height=30, font=FONT_MONO_SM,
+            fg_color=BG_INPUT, text_color=TEXT_PRIMARY,
+            border_color=BORDER_SUBTLE, button_color=BG_HOVER,
+            button_hover_color="#495057", dropdown_fg_color=BG_WIDGET,
+            dropdown_text_color=TEXT_PRIMARY,
+            dropdown_hover_color=BG_HOVER, corner_radius=6,
+            state="disabled",
+        )
+        self._tz_combo.pack(side="right")
+        self._settings_fields["display_timezone"] = self._tz_var
+
+        _label(s6, text="Type any pytz timezone name or pick from the list above.",
+               font=("Pretendard", 10), text_color=TEXT_SECONDARY).pack(
+            anchor="w", padx=PAD, pady=(0, 6))
+
+        # ──────────────────────────────────────────────────────────────
+        # SECTION 7: Advanced (Volatility / Confidence / Social)
+        # ──────────────────────────────────────────────────────────────
+        s7 = _card(outer)
+        s7.pack(fill="x", pady=(0, 10))
+        _heading(s7, text="Advanced Thresholds").pack(
+            anchor="w", padx=PAD, pady=(PAD, 6))
+
+        adv_fields = [
+            ("price_change_threshold_pct", "Price Change Alert (%)", 0.01, 100.0),
+            ("volume_spike_multiplier", "Volume Spike Multiplier", 1.0, 100.0),
+            ("sentiment_drop_threshold_pct", "Sentiment Drop Alert (%)", 1.0, 100.0),
+            ("individual_drawdown_pct", "Individual Drawdown (%)", 0.01, 100.0),
+            ("high_confidence_threshold", "High Confidence (0-1)", 0.0, 1.0),
+            ("low_confidence_threshold", "Low Confidence (0-1)", 0.0, 1.0),
+            ("high_confidence_position_mult", "High-Conf Position Mult", 0.01, 10.0),
+            ("low_confidence_position_mult", "Low-Conf Position Mult", 0.01, 10.0),
+            ("low_reliability_weight", "Low Reliability Weight (0-1)", 0.0, 1.0),
+        ]
+        for key, label_text, lo, hi in adv_fields:
+            self._add_number_field(s7, key, label_text, lo, hi)
+
+        # Strategy intervals
+        self._add_number_field(s7, "strategy_update_interval_min",
+                               "Strategy Review Interval (min)", 1, 1440)
+        self._add_number_field(s7, "grok_scan_interval_min",
+                               "Grok Scan Interval (min)", 1, 1440)
+
+        # Toggles
+        for toggle_key, toggle_label in [
+            ("allow_extended_hours", "Allow Extended Hours"),
+            ("enable_prompt_caching", "Enable Prompt Caching"),
+            ("db_backup_enabled", "Database Backup"),
+            ("social_noise_filter_enabled", "Social Noise Filter"),
+        ]:
+            self._add_toggle_field(s7, toggle_key, toggle_label)
+
+        # ──────────────────────────────────────────────────────────────
+        # SECTION 8: API Key Input (hybrid) + Read-only status
+        # ──────────────────────────────────────────────────────────────
+        s8 = _card(outer)
+        s8.pack(fill="x", pady=(0, 10))
+        _heading(s8, text="API Keys (Hybrid: input here → stored on server)").pack(
+            anchor="w", padx=PAD, pady=(PAD, 6))
+        _label(s8, text="Keys are sent to the server and erased from client memory.",
+               font=FONT_SMALL, text_color=TEXT_SECONDARY).pack(
+            anchor="w", padx=PAD, pady=(0, 8))
+
+        self._api_key_entries: dict[str, ctk.CTkEntry] = {}
+        for key_name, display_label in [
+            ("ANTHROPIC_API_KEY", "Anthropic (Claude)"),
+            ("XAI_GROK_API_KEY", "xAI (Grok)"),
+            ("POLYGON_API_KEY", "Polygon.io"),
+            ("APCA_API_KEY_ID", "Alpaca Key ID"),
+            ("APCA_API_SECRET_KEY", "Alpaca Secret"),
+        ]:
+            r = ctk.CTkFrame(s8, fg_color="transparent")
+            r.pack(fill="x", padx=PAD, pady=2)
+            _label(r, text=display_label, font=FONT_SMALL,
+                   text_color=TEXT_SECONDARY, width=140).pack(side="left")
+            entry = ctk.CTkEntry(
+                r, placeholder_text="Paste key here…", show="•",
+                font=FONT_MONO_SM, fg_color=BG_INPUT, text_color=TEXT_PRIMARY,
+                border_color=BORDER_SUBTLE, corner_radius=6, height=28,
+                state="disabled",
+            )
+            entry.pack(side="left", fill="x", expand=True, padx=(8, 0))
+            self._api_key_entries[key_name] = entry
+
+        key_btn_row = ctk.CTkFrame(s8, fg_color="transparent")
+        key_btn_row.pack(fill="x", padx=PAD, pady=(8, 4))
+        self._submit_keys_btn = ctk.CTkButton(
+            key_btn_row, text="🔑 Apply Keys to Server", width=180, height=30,
+            corner_radius=6, fg_color="#2b3a42", hover_color="#334950",
+            text_color=ACCENT_CYAN, font=("Pretendard", 11, "bold"),
+            command=self._submit_api_keys, state="disabled",
+        )
+        self._submit_keys_btn.pack(side="left")
+
+        # Key status (read-only)
+        _label(s8, text="Key Status (read-only)", font=FONT_SMALL,
+               text_color=TEXT_SECONDARY).pack(anchor="w", padx=PAD, pady=(8, 4))
+
+        self._key_status_labels: dict[str, ctk.CTkLabel] = {}
+        for key_name, display_label in [
+            ("ANTHROPIC_API_KEY", "Anthropic"),
+            ("XAI_GROK_API_KEY", "xAI Grok"),
+            ("POLYGON_API_KEY", "Polygon"),
+            ("APCA_API_KEY_ID", "Alpaca ID"),
+            ("APCA_API_SECRET_KEY", "Alpaca Secret"),
+        ]:
+            r = ctk.CTkFrame(s8, fg_color="transparent")
+            r.pack(fill="x", padx=PAD, pady=1)
+            _label(r, text=f"{display_label}:", font=FONT_SMALL,
+                   text_color=TEXT_SECONDARY, width=100).pack(side="left")
+            status_lbl = _label(r, text="checking…", font=FONT_MONO_SM,
+                                text_color=TEXT_SECONDARY)
+            status_lbl.pack(side="left", padx=(8, 0))
+            self._key_status_labels[key_name] = status_lbl
+
+        ctk.CTkFrame(s8, fg_color="transparent", height=8).pack()
+
+        # Initial load
+        self.after(600, self._load_settings_from_server)
+        self.after(800, self._load_key_status)
+
+    # ── Settings tab: helpers ──────────────────────────────────────────
+
+    def _add_number_field(self, parent: Any, key: str, label_text: str,
+                          lo: float, hi: float) -> None:
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=PAD, pady=2)
+        _label(row, text=label_text, font=FONT_SMALL,
+               text_color=TEXT_SECONDARY).pack(side="left")
+        var = ctk.StringVar(value="")
+        entry = ctk.CTkEntry(
+            row, textvariable=var, width=100, height=28,
+            font=FONT_MONO_SM, fg_color=BG_INPUT, text_color=TEXT_PRIMARY,
+            border_color=BORDER_SUBTLE, corner_radius=6, state="disabled",
+        )
+        entry.pack(side="right")
+        self._settings_fields[key] = (var, entry, lo, hi)
+
+    def _add_dropdown_field(self, parent: Any, key: str, label_text: str,
+                            options: list[str]) -> None:
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=PAD, pady=2)
+        _label(row, text=label_text, font=FONT_SMALL,
+               text_color=TEXT_SECONDARY).pack(side="left")
+        var = ctk.StringVar(value=options[0])
+        combo = ctk.CTkComboBox(
+            row, values=options, variable=var,
+            width=180, height=28, font=FONT_MONO_SM,
+            fg_color=BG_INPUT, text_color=TEXT_PRIMARY,
+            border_color=BORDER_SUBTLE, button_color=BG_HOVER,
+            button_hover_color="#495057", dropdown_fg_color=BG_WIDGET,
+            dropdown_text_color=TEXT_PRIMARY,
+            dropdown_hover_color=BG_HOVER, corner_radius=6,
+            state="disabled",
+        )
+        combo.pack(side="right")
+        self._settings_fields[key] = (var, combo)
+
+    def _add_toggle_field(self, parent: Any, key: str,
+                          label_text: str) -> None:
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=PAD, pady=2)
+        _label(row, text=label_text, font=FONT_SMALL,
+               text_color=TEXT_SECONDARY).pack(side="left")
+        var = ctk.StringVar(value="on")
+        switch = ctk.CTkSwitch(
+            row, text="", variable=var, onvalue="on", offvalue="off",
+            fg_color=BG_INPUT, progress_color=ACCENT_CYAN,
+            button_color=TEXT_SECONDARY, button_hover_color=TEXT_PRIMARY,
+            state="disabled",
+        )
+        switch.pack(side="right")
+        self._settings_fields[key] = (var, switch)
+
+    # ── Settings tab: edit-mode toggle ──
+
+    def _toggle_settings_edit(self) -> None:
+        self._settings_edit_mode = not self._settings_edit_mode
+        new_state = "normal" if self._settings_edit_mode else "disabled"
+
+        self._settings_edit_btn.configure(
+            text="🔒 Lock" if self._settings_edit_mode else "🔓 Edit Mode",
+            fg_color="#3b2a10" if self._settings_edit_mode else "#2b3a42",
+            text_color=ACCENT_GOLD if self._settings_edit_mode else ACCENT_CYAN,
+        )
+        self._settings_save_btn.configure(state=new_state)
+        self._settings_reset_btn.configure(state=new_state)
+        self._mode_switch.configure(state=new_state)
+        self._dyn_universe_switch.configure(state=new_state)
+        self._tz_combo.configure(state=new_state)
+
+        # Number / dropdown / toggle fields
+        for key, field_data in self._settings_fields.items():
+            if key in ("trading_mode", "enable_dynamic_universe",
+                       "display_timezone"):
+                continue  # handled above
+            if key == "fixed_tickers":
+                # Respect dynamic universe toggle when in edit mode
+                if self._settings_edit_mode:
+                    dyn_on = self._dyn_universe_var.get() == "on"
+                    self._fixed_tickers_entry.configure(
+                        state="disabled" if dyn_on else "normal")
+                else:
+                    self._fixed_tickers_entry.configure(state="disabled")
+                continue
+            if isinstance(field_data, tuple):
+                if len(field_data) == 4:
+                    _, entry, _, _ = field_data
+                    entry.configure(state=new_state)
+                elif len(field_data) == 2:
+                    _, widget = field_data
+                    widget.configure(state=new_state)
+
+        # API key entries
+        for entry in self._api_key_entries.values():
+            entry.configure(state=new_state)
+        self._submit_keys_btn.configure(state=new_state)
+
+        # When locking, revert to last saved values from server
+        if not self._settings_edit_mode:
+            self._load_settings_from_server()
+
+    def _on_dynamic_universe_toggle(self) -> None:
+        """Disable Fixed Tickers entry when Dynamic Universe is on."""
+        if not self._settings_edit_mode:
+            return
+        dyn_on = self._dyn_universe_var.get() == "on"
+        self._fixed_tickers_entry.configure(
+            state="disabled" if dyn_on else "normal")
+
+    # ── Settings tab: load from server ──
+
+    def _load_settings_from_server(self) -> None:
+        def _fetch() -> None:
+            try:
+                resp = self._http.get("/api/settings")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    self.after(0, self._apply_settings_to_ui,
+                              data.get("settings", {}))
+            except Exception:
+                self.after(0, self._set_sync_indicator, False)
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _apply_settings_to_ui(self, data: dict) -> None:
+        """Populate fields from server data."""
+        for key, field_data in self._settings_fields.items():
+            val = data.get(key)
+            if val is None:
+                continue
+
+            if key == "trading_mode":
+                self._mode_switch_var.set(str(val))
+            elif key == "enable_dynamic_universe":
+                self._dyn_universe_var.set("on" if val else "off")
+            elif key == "display_timezone":
+                self._tz_var.set(str(val))
+            elif key == "fixed_tickers":
+                self._fixed_tickers_entry.configure(state="normal")
+                self._fixed_tickers_entry.delete(0, "end")
+                if isinstance(val, list):
+                    self._fixed_tickers_entry.insert(0, ", ".join(val))
+                else:
+                    self._fixed_tickers_entry.insert(0, str(val))
+                if not self._settings_edit_mode:
+                    self._fixed_tickers_entry.configure(state="disabled")
+            elif isinstance(field_data, tuple):
+                if len(field_data) == 4:
+                    var, _, _, _ = field_data
+                    var.set(str(val))
+                elif len(field_data) == 2:
+                    var, widget = field_data
+                    if isinstance(widget, ctk.CTkSwitch):
+                        var.set("on" if val else "off")
+                    elif key.startswith("ai_model_"):
+                        # Translate API ID → display name
+                        display = self._ai_model_reverse.get(str(val), str(val))
+                        var.set(display)
+                    else:
+                        var.set(str(val))
+
+        self._set_sync_indicator(True)
+
+    # ── Settings tab: save ──
+
+    def _save_settings(self) -> None:
+        """Collect values, validate locally, send to server."""
+        # Critical change guard: trading mode paper→live
+        old_mode = self._mode_switch_var.get()
+        new_mode = self._mode_switch_var.get()
+        # We check what's in the current widget vs what server had
+        # For now, if user tries to go live, confirm
+        if new_mode == "live":
+            dialog = ctk.CTkInputDialog(
+                text="Switching to LIVE mode trades REAL money!\n"
+                     "Type 'CONFIRM' to proceed.",
+                title="⚠  Master Lock — Trading Mode",
+            )
+            result = dialog.get_input()
+            if result != "CONFIRM":
+                return
+
+        patch = self._collect_settings_patch()
+        if patch is None:
+            return  # validation failed
+
+        self._settings_save_btn.configure(state="disabled", text="Saving…")
+
+        def _work() -> None:
+            ok = False
+            errors: list[str] = []
+            try:
+                resp = self._http.put("/api/settings",
+                                      json={"patch": patch}, timeout=10)
+                if resp.status_code == 200:
+                    body = resp.json()
+                    ok = body.get("ok", False)
+                    errors = body.get("errors", [])
+                    if ok:
+                        self.after(0, self._apply_settings_to_ui,
+                                  body.get("settings", {}))
+            except Exception as exc:
+                errors = [str(exc)]
+
+            def _done() -> None:
+                self._settings_save_btn.configure(state="normal",
+                                                   text="💾 Save & Apply")
+                if ok:
+                    self._set_sync_indicator(True)
+                    self._append_log({
+                        "agent": "system", "action": "settings_updated",
+                        "thought": "Settings saved and applied.",
+                    })
+                else:
+                    self._set_sync_indicator(False)
+                    err_text = "; ".join(errors) if errors else "Unknown error"
+                    self._append_log({
+                        "agent": "system", "action": "settings_error",
+                        "thought": f"Settings save failed: {err_text}",
+                    })
+
+            self.after(0, _done)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _collect_settings_patch(self) -> dict[str, Any] | None:
+        """Read all widgets and build a patch dict. Returns None on error."""
+        patch: dict[str, Any] = {}
+        errors: list[str] = []
+
+        for key, field_data in self._settings_fields.items():
+            if key == "trading_mode":
+                patch[key] = self._mode_switch_var.get()
+            elif key == "enable_dynamic_universe":
+                patch[key] = self._dyn_universe_var.get() == "on"
+            elif key == "display_timezone":
+                patch[key] = self._tz_var.get()
+            elif key == "fixed_tickers":
+                raw = self._fixed_tickers_entry.get().strip()
+                tickers = [t.strip().upper() for t in raw.split(",")
+                           if t.strip()]
+                patch[key] = tickers
+            elif isinstance(field_data, tuple):
+                if len(field_data) == 4:
+                    var, _, lo, hi = field_data
+                    raw_val = var.get().strip()
+                    try:
+                        num = float(raw_val)
+                    except ValueError:
+                        errors.append(f"{key}: not a valid number")
+                        continue
+                    if num < lo or num > hi:
+                        errors.append(f"{key}: must be {lo}–{hi}")
+                        continue
+                    # Use int if the default is int-like
+                    patch[key] = int(num) if num == int(num) and lo >= 1 else num
+                elif len(field_data) == 2:
+                    var, widget = field_data
+                    if isinstance(widget, ctk.CTkSwitch):
+                        patch[key] = var.get() == "on"
+                    elif key.startswith("ai_model_"):
+                        # Translate display name → API ID
+                        display = var.get()
+                        patch[key] = self._ai_model_map.get(display, display)
+                    else:
+                        patch[key] = var.get()
+
+        if errors:
+            err_text = "\n".join(errors)
+            self._append_log({
+                "agent": "system", "action": "validation_error",
+                "thought": f"Settings validation failed:\n{err_text}",
+            })
+            return None
+        return patch
+
+    # ── Settings tab: reset ──
+
+    def _reset_settings(self) -> None:
+        dialog = ctk.CTkInputDialog(
+            text="This will reset ALL settings to factory defaults.\n"
+                 "Type 'CONFIRM' to proceed.",
+            title="↺  Reset to Default",
+        )
+        result = dialog.get_input()
+        if result != "CONFIRM":
+            return
+
+        def _work() -> None:
+            try:
+                resp = self._http.post("/api/settings/reset", timeout=10)
+                if resp.status_code == 200:
+                    body = resp.json()
+                    if body.get("ok"):
+                        self.after(0, self._apply_settings_to_ui,
+                                  body.get("settings", {}))
+                        self.after(0, self._set_sync_indicator, True)
+                        self.after(0, self._append_log, {
+                            "agent": "system", "action": "settings_reset",
+                            "thought": "Settings reset to defaults.",
+                        })
+                        return
+            except Exception:
+                pass
+            self.after(0, self._set_sync_indicator, False)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    # ── Settings tab: API keys ──
+
+    def _submit_api_keys(self) -> None:
+        keys: dict[str, str] = {}
+        for key_name, entry in self._api_key_entries.items():
+            val = entry.get().strip()
+            if val:
+                keys[key_name] = val
+
+        if not keys:
+            return
+
+        # Wipe from UI immediately
+        for entry in self._api_key_entries.values():
+            entry.configure(state="normal")
+            entry.delete(0, "end")
+            if not self._settings_edit_mode:
+                entry.configure(state="disabled")
+
+        self._submit_keys_btn.configure(state="disabled", text="Sending…")
+
+        def _work() -> None:
+            ok = False
+            try:
+                resp = self._http.post("/api/keys", json=keys, timeout=10)
+                ok = resp.status_code == 200 and resp.json().get("ok", False)
+            except Exception:
+                pass
+
+            def _done() -> None:
+                self._submit_keys_btn.configure(
+                    state="normal" if self._settings_edit_mode else "disabled",
+                    text="🔑 Apply Keys to Server",
+                )
+                if ok:
+                    self._append_log({
+                        "agent": "system", "action": "api_keys_updated",
+                        "thought": f"API keys submitted: {', '.join(keys.keys())}",
+                    })
+                    self._load_key_status()
+                else:
+                    self._append_log({
+                        "agent": "system", "action": "error",
+                        "thought": "Failed to submit API keys.",
+                    })
+
+            self.after(0, _done)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _load_key_status(self) -> None:
+        def _fetch() -> None:
+            try:
+                resp = self._http.get("/api/keys/status")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    self.after(0, self._apply_key_status, data)
+            except Exception:
+                pass
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _apply_key_status(self, data: dict) -> None:
+        for key_name, lbl in self._key_status_labels.items():
+            status = data.get(key_name, "Unknown")
+            color = ACCENT_GREEN if "Loaded" in status else ACCENT_AMBER
+            lbl.configure(text=status, text_color=color)
+
+    # ── Sync indicator ──
+
+    def _set_sync_indicator(self, synced: bool) -> None:
+        if synced:
+            self._sync_indicator.configure(
+                text="●  Server Synced", text_color=ACCENT_GREEN)
+        else:
+            self._sync_indicator.configure(
+                text="●  Out of Sync", text_color=ACCENT_RED)
+
     # ==================================================================
     # Chart helpers
     # ==================================================================
@@ -688,6 +1489,85 @@ class TradingBotApp(ctk.CTk):
         self._ax.set_xlabel("Ticks", color=TEXT_SECONDARY, fontsize=9)
         self._ax.set_ylabel("Price ($)", color=TEXT_SECONDARY, fontsize=9)
         self._ax.grid(True, color=BORDER_SUBTLE, alpha=0.3, linewidth=0.5)
+
+    # ------------------------------------------------------------------
+    # Ticker Search (autocomplete)
+    # ------------------------------------------------------------------
+    def _on_ticker_search(self, event=None) -> None:
+        """Fire a search request on each keystroke."""
+        query = self._ticker_search_var.get().strip()
+        if len(query) < 1:
+            self._hide_ticker_dropdown()
+            return
+
+        def _fetch():
+            try:
+                resp = self._http.get(
+                    "/api/tickers/search",
+                    params={"q": query, "limit": 10},
+                )
+                if resp.status_code == 200:
+                    results = resp.json().get("results", [])
+                    self.after(0, self._show_ticker_dropdown, results)
+            except Exception:
+                pass
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _show_ticker_dropdown(self, results: list[str]) -> None:
+        """Display search results in a floating dropdown."""
+        # Clear old buttons
+        for btn in self._ticker_dropdown_buttons:
+            btn.destroy()
+        self._ticker_dropdown_buttons.clear()
+
+        if not results:
+            self._hide_ticker_dropdown()
+            return
+
+        for sym in results:
+            btn = ctk.CTkButton(
+                self._ticker_dropdown, text=sym, height=24, width=120,
+                font=FONT_MONO_SM, corner_radius=0, anchor="w",
+                fg_color=BG_WIDGET, hover_color=BG_HOVER,
+                text_color=TEXT_PRIMARY,
+                command=lambda s=sym: self._select_search_ticker(s),
+            )
+            btn.pack(fill="x")
+            self._ticker_dropdown_buttons.append(btn)
+
+        # Position dropdown below the search entry
+        entry = self._ticker_search_entry
+        x = entry.winfo_rootx() - self._ticker_dropdown.master.winfo_rootx()
+        y = (entry.winfo_rooty() - self._ticker_dropdown.master.winfo_rooty()
+             + entry.winfo_height())
+        self._ticker_dropdown.place(x=x, y=y, width=140)
+        self._ticker_dropdown.lift()
+
+    def _hide_ticker_dropdown(self) -> None:
+        """Hide the autocomplete dropdown."""
+        self._ticker_dropdown.place_forget()
+        for btn in self._ticker_dropdown_buttons:
+            btn.destroy()
+        self._ticker_dropdown_buttons.clear()
+
+    def _select_search_ticker(self, symbol: str) -> None:
+        """User clicked a search result — switch chart to that ticker."""
+        self._ticker_search_var.set("")
+        self._hide_ticker_dropdown()
+        self._selected_chart_symbol = symbol
+        self._fetch_candles(symbol, self._selected_timeframe)
+        self._highlight_universe_button(symbol)
+
+    def _on_ticker_search_select(self, event=None) -> None:
+        """Enter pressed — pick the first dropdown item or search text."""
+        if self._ticker_dropdown_buttons:
+            first = self._ticker_dropdown_buttons[0].cget("text")
+            self._select_search_ticker(first)
+        else:
+            raw = self._ticker_search_var.get().strip().upper()
+            if raw:
+                self._select_search_ticker(raw)
 
     def _on_timeframe_change(self, tf: str) -> None:
         """Handle timeframe button click."""
@@ -721,20 +1601,14 @@ class TradingBotApp(ctk.CTk):
         threading.Thread(target=_fetch, daemon=True).start()
 
     def _draw_candle_chart(self, symbol: str, candles: list[dict]) -> None:
-        """Draw candle data on the chart."""
+        """Draw candle data on the chart via the throttled blit system."""
         prices = [c.get("close", 0) for c in candles]
         if not prices:
             return
-
-        self._ax.clear()
-        self._style_ax()
-        self._ax.plot(prices, color=ACCENT_CYAN, linewidth=1.6, alpha=0.9,
-                      label=f"{symbol} ({self._selected_timeframe})")
-        self._ax.legend(
-            facecolor=BG_WIDGET, labelcolor=TEXT_PRIMARY,
-            fontsize=8, edgecolor=BORDER_SUBTLE, framealpha=0.9)
-        self._fig.tight_layout(pad=1.5)
-        self._canvas.draw_idle()
+        self._chart_data = {symbol: prices}
+        self._chart_lines.clear()  # force full redraw
+        self._chart_dirty = True
+        self._do_chart_redraw()
 
     # ==================================================================
     # Ticker Cards
@@ -786,10 +1660,52 @@ class TradingBotApp(ctk.CTk):
             for child in row.winfo_children():
                 child.bind("<Button-1>", lambda e, s=sym: self._on_ticker_click(s))
 
+        self.after(100, self._check_sidebar_scroll)
+
     def _on_ticker_click(self, symbol: str) -> None:
         """Select a ticker for the chart."""
         self._selected_chart_symbol = symbol
         self._fetch_candles(symbol, self._selected_timeframe)
+        self._highlight_universe_button(symbol)
+
+    def _update_universe_display(self, symbols: list[str]) -> None:
+        """Rebuild the Universe section with clickable ticker buttons."""
+        for w in self._universe_frame.winfo_children():
+            w.destroy()
+        self._universe_buttons.clear()
+
+        if not symbols:
+            _label(self._universe_frame, text="—", font=FONT_MONO_SM,
+                   text_color=TEXT_SECONDARY).pack(anchor="w")
+            return
+
+        # Flow-wrap: pack buttons left-to-right in rows
+        row_frame = ctk.CTkFrame(self._universe_frame, fg_color="transparent")
+        row_frame.pack(fill="x", anchor="w")
+        for sym in symbols:
+            is_selected = sym == self._selected_chart_symbol
+            btn = ctk.CTkButton(
+                row_frame, text=sym, width=60, height=24,
+                font=FONT_MONO_SM, corner_radius=4,
+                fg_color="#2b3a42" if is_selected else BG_INPUT,
+                text_color=ACCENT_CYAN if is_selected else TEXT_SECONDARY,
+                hover_color="#2b3a42",
+                command=lambda s=sym: self._on_ticker_click(s),
+            )
+            btn.pack(side="left", padx=2, pady=2)
+            self._universe_buttons.append(btn)
+
+        if symbols and not self._selected_chart_symbol:
+            self._selected_chart_symbol = symbols[0]
+            self._highlight_universe_button(symbols[0])
+
+    def _highlight_universe_button(self, symbol: str) -> None:
+        """Highlight the selected universe ticker button."""
+        for btn in self._universe_buttons:
+            if btn.cget("text") == symbol:
+                btn.configure(fg_color="#2b3a42", text_color=ACCENT_CYAN)
+            else:
+                btn.configure(fg_color=BG_INPUT, text_color=TEXT_SECONDARY)
 
     # ==================================================================
     # SSE Integration
@@ -799,7 +1715,23 @@ class TradingBotApp(ctk.CTk):
         self._sse.start()
 
     def _on_sse_event(self, event_type: str, data: dict) -> None:
-        self.after(0, self._process_sse, event_type, data)
+        """Schedule SSE event processing with throttling (100-200 ms)."""
+        self.after(0, self._buffer_sse_event, event_type, data)
+
+    def _buffer_sse_event(self, event_type: str, data: dict) -> None:
+        """Buffer SSE events and schedule a throttled flush."""
+        self._pending_sse_updates.append((event_type, data))
+        if not self._sse_flush_scheduled:
+            self._sse_flush_scheduled = True
+            self.after(self._ui_throttle_ms, self._flush_sse_updates)
+
+    def _flush_sse_updates(self) -> None:
+        """Process all buffered SSE events in one batch."""
+        self._sse_flush_scheduled = False
+        events = self._pending_sse_updates[:]
+        self._pending_sse_updates.clear()
+        for event_type, data in events:
+            self._process_sse(event_type, data)
 
     def _process_sse(self, event_type: str, data: dict) -> None:
         try:
@@ -818,75 +1750,73 @@ class TradingBotApp(ctk.CTk):
                 self._append_log(data)
             elif event_type == "universe":
                 symbols = data.get("symbols", [])
-                self._symbols_label.configure(
-                    text="  ·  ".join(symbols) if symbols else "—")
+                self._update_universe_display(symbols)
         except Exception:
             pass
 
     # ==================================================================
-    # Polling fallback
+    # Polling fallback (background-threaded)
     # ==================================================================
     def _poll_status(self) -> None:
-        try:
-            resp = self._http.get("/api/status")
-            if resp.status_code == 200:
-                data = resp.json()
-                self._set_indicator("server", True)
-                self._bot_running = data.get("bot_status") == "running"
-                self._update_bot_buttons()
-
-                if data.get("portfolio"):
-                    self._update_portfolio_display(data["portfolio"])
-
-                symbols = data.get("tracked_symbols", [])
-                self._symbols_label.configure(
-                    text="  ·  ".join(symbols) if symbols else "—")
-
-                # Set first symbol as chart default
-                if symbols and not self._selected_chart_symbol:
-                    self._selected_chart_symbol = symbols[0]
-
-                mode = "PAPER" if "paper" in data.get("trading_mode", "") else "LIVE"
-                if mode == "PAPER":
-                    self._mode_badge.configure(
-                        text="  PAPER  ", fg_color="#3b3416",
-                        text_color=ACCENT_GOLD)
+        """Fetch status on a background thread; apply on the main thread."""
+        def _fetch() -> None:
+            try:
+                resp = self._http.get("/api/status")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    self.after(0, self._apply_status, data)
                 else:
-                    self._mode_badge.configure(
-                        text="  LIVE  ", fg_color="#3b1219",
-                        text_color=ACCENT_RED)
+                    self.after(0, self._set_indicator, "server", False)
+            except Exception:
+                self.after(0, self._set_indicator, "server", False)
 
-                strategy = data.get("current_strategy")
-                if strategy:
-                    self._update_strategy({"reasoning": strategy})
-
-                risk = data.get("risk", {})
-                if risk.get("is_emergency"):
-                    self._mode_badge.configure(
-                        text="  ⚠ EMERGENCY  ", fg_color="#3b1219",
-                        text_color=ACCENT_RED)
-
-                # Rest mode indicator
-                if data.get("is_rest_mode"):
-                    self._rest_badge.configure(
-                        text="  💤 REST  ", fg_color="#3b3416")
-                else:
-                    self._rest_badge.configure(text="", fg_color=BG_WIDGET)
-
-                # AI cost
-                cost = data.get("ai_cost_today", 0)
-                self._cost_badge.configure(text=f"  AI: ${cost:.2f}  ")
-
-                # Ticker cards
-                cards = data.get("ticker_cards", [])
-                if cards:
-                    self._update_ticker_cards(cards)
-            else:
-                self._set_indicator("server", False)
-        except Exception:
-            self._set_indicator("server", False)
-
+        threading.Thread(target=_fetch, daemon=True).start()
         self.after(POLL_INTERVAL_MS, self._poll_status)
+
+    def _apply_status(self, data: dict) -> None:
+        """Apply polled status data to the UI (main thread only)."""
+        self._set_indicator("server", True)
+        self._bot_running = data.get("bot_status") == "running"
+        self._update_bot_buttons()
+
+        if data.get("portfolio"):
+            self._update_portfolio_display(data["portfolio"])
+
+        symbols = data.get("tracked_symbols", [])
+        self._update_universe_display(symbols)
+
+        mode = "PAPER" if "paper" in data.get("trading_mode", "") else "LIVE"
+        if mode == "PAPER":
+            self._mode_badge.configure(
+                text="  PAPER  ", fg_color="#3b3416",
+                text_color=ACCENT_GOLD)
+        else:
+            self._mode_badge.configure(
+                text="  LIVE  ", fg_color="#3b1219",
+                text_color=ACCENT_RED)
+
+        strategy = data.get("current_strategy")
+        if strategy:
+            self._update_strategy({"reasoning": strategy})
+
+        risk = data.get("risk", {})
+        if risk.get("is_emergency"):
+            self._mode_badge.configure(
+                text="  ⚠ EMERGENCY  ", fg_color="#3b1219",
+                text_color=ACCENT_RED)
+
+        if data.get("is_rest_mode"):
+            self._rest_badge.configure(
+                text="  💤 REST  ", fg_color="#3b3416")
+        else:
+            self._rest_badge.configure(text="", fg_color=BG_WIDGET)
+
+        cost = data.get("ai_cost_today", 0)
+        self._cost_badge.configure(text=f"  AI: ${cost:.2f}  ")
+
+        cards = data.get("ticker_cards", [])
+        if cards:
+            self._update_ticker_cards(cards)
 
     # ==================================================================
     # LED indicator helpers
@@ -971,7 +1901,6 @@ class TradingBotApp(ctk.CTk):
         if not symbol or price <= 0:
             return
 
-        # Set default chart symbol
         if not self._selected_chart_symbol:
             self._selected_chart_symbol = symbol
 
@@ -981,22 +1910,63 @@ class TradingBotApp(ctk.CTk):
         if len(self._chart_data[symbol]) > 100:
             self._chart_data[symbol] = self._chart_data[symbol][-100:]
 
-        self._ax.clear()
-        self._style_ax()
+        self._chart_dirty = True
+        self._schedule_chart_redraw()
+
+    def _schedule_chart_redraw(self) -> None:
+        """Throttle chart redraws to at most once per _chart_throttle_s."""
+        if self._chart_redraw_pending:
+            return
+        now = time.monotonic()
+        elapsed = now - self._last_chart_draw
+        if elapsed >= self._chart_throttle_s:
+            self._do_chart_redraw()
+        else:
+            self._chart_redraw_pending = True
+            delay = int((self._chart_throttle_s - elapsed) * 1000)
+            self.after(max(delay, 50), self._do_chart_redraw)
+
+    def _do_chart_redraw(self) -> None:
+        """Efficient chart redraw — full redraw only when symbol set changes,
+        otherwise update existing Line2D data (blit-style)."""
+        self._chart_redraw_pending = False
+        if not self._chart_dirty:
+            return
+        self._chart_dirty = False
+        self._last_chart_draw = time.monotonic()
+
+        if not self._chart_data:
+            return
 
         palette = [ACCENT_CYAN, ACCENT_GOLD, ACCENT_GREEN, ACCENT_RED,
                    ACCENT_PURPLE]
-        for i, (sym, prices) in enumerate(self._chart_data.items()):
-            c = palette[i % len(palette)]
-            self._ax.plot(prices, label=sym, color=c, linewidth=1.6, alpha=0.9)
+        current_syms = set(self._chart_data.keys())
+        cached_syms = set(self._chart_lines.keys())
 
-        if self._chart_data:
-            self._ax.legend(
-                facecolor=BG_WIDGET, labelcolor=TEXT_PRIMARY,
-                fontsize=8, edgecolor=BORDER_SUBTLE, framealpha=0.9)
-
-        self._fig.tight_layout(pad=1.5)
-        self._canvas.draw_idle()
+        if current_syms != cached_syms:
+            # Symbol set changed → full redraw
+            self._ax.clear()
+            self._style_ax()
+            self._chart_lines.clear()
+            for i, (sym, prices) in enumerate(self._chart_data.items()):
+                c = palette[i % len(palette)]
+                (line,) = self._ax.plot(
+                    prices, label=sym, color=c, linewidth=1.6, alpha=0.9)
+                self._chart_lines[sym] = line
+            if self._chart_data:
+                self._ax.legend(
+                    facecolor=BG_WIDGET, labelcolor=TEXT_PRIMARY,
+                    fontsize=8, edgecolor=BORDER_SUBTLE, framealpha=0.9)
+            self._fig.tight_layout(pad=1.5)
+            self._canvas.draw()
+        else:
+            # Incremental update — only update line data
+            for sym, prices in self._chart_data.items():
+                line = self._chart_lines[sym]
+                line.set_data(range(len(prices)), prices)
+            self._ax.relim()
+            self._ax.autoscale_view()
+            self._canvas.draw_idle()
 
     def _append_feed(self, data: dict) -> None:
         """Append insight or log to the data feed with colour tags."""
@@ -1231,47 +2201,75 @@ class TradingBotApp(ctk.CTk):
         self._journal_text.configure(state="disabled")
 
     # ==================================================================
-    # Button Handlers
+    # Button Handlers (HTTP calls run on background threads)
     # ==================================================================
     def _on_start(self) -> None:
-        try:
-            resp = self._http.post("/api/bot/start")
-            if resp.status_code == 200:
-                self._bot_running = True
-                self._update_bot_buttons()
-                self._append_feed({
-                    "agent": "system", "action": "bot_started",
-                    "thought": "Bot started successfully.",
-                })
-                self._append_log({
-                    "agent": "system", "action": "bot_started",
-                    "thought": "Bot started successfully.",
-                })
-        except Exception as e:
-            self._append_feed({
-                "agent": "system", "action": "error",
-                "thought": f"Failed to start bot: {e}",
-            })
+        self._start_btn.configure(state="disabled")
+
+        def _work() -> None:
+            success = False
+            try:
+                resp = self._http.post("/api/bot/start")
+                success = resp.status_code == 200
+            except Exception:
+                pass
+
+            def _update() -> None:
+                if success:
+                    self._bot_running = True
+                    self._update_bot_buttons()
+                    self._append_feed({
+                        "agent": "system", "action": "bot_started",
+                        "thought": "Bot started successfully.",
+                    })
+                    self._append_log({
+                        "agent": "system", "action": "bot_started",
+                        "thought": "Bot started successfully.",
+                    })
+                else:
+                    self._start_btn.configure(state="normal")
+                    self._append_feed({
+                        "agent": "system", "action": "error",
+                        "thought": "Failed to start bot.",
+                    })
+
+            self.after(0, _update)
+
+        threading.Thread(target=_work, daemon=True).start()
 
     def _on_stop(self) -> None:
-        try:
-            resp = self._http.post("/api/bot/stop")
-            if resp.status_code == 200:
-                self._bot_running = False
-                self._update_bot_buttons()
-                self._append_feed({
-                    "agent": "system", "action": "bot_stopped",
-                    "thought": "Bot stopped.",
-                })
-                self._append_log({
-                    "agent": "system", "action": "bot_stopped",
-                    "thought": "Bot stopped.",
-                })
-        except Exception as e:
-            self._append_feed({
-                "agent": "system", "action": "error",
-                "thought": f"Failed to stop bot: {e}",
-            })
+        self._stop_btn.configure(state="disabled")
+
+        def _work() -> None:
+            success = False
+            try:
+                resp = self._http.post("/api/bot/stop")
+                success = resp.status_code == 200
+            except Exception:
+                pass
+
+            def _update() -> None:
+                if success:
+                    self._bot_running = False
+                    self._update_bot_buttons()
+                    self._append_feed({
+                        "agent": "system", "action": "bot_stopped",
+                        "thought": "Bot stopped.",
+                    })
+                    self._append_log({
+                        "agent": "system", "action": "bot_stopped",
+                        "thought": "Bot stopped.",
+                    })
+                else:
+                    self._stop_btn.configure(state="normal")
+                    self._append_feed({
+                        "agent": "system", "action": "error",
+                        "thought": "Failed to stop bot.",
+                    })
+
+            self.after(0, _update)
+
+        threading.Thread(target=_work, daemon=True).start()
 
     def _on_emergency(self) -> None:
         """Emergency kill switch — liquidate all and halt."""
@@ -1283,30 +2281,47 @@ class TradingBotApp(ctk.CTk):
         result = dialog.get_input()
         if result != "CONFIRM":
             return
-        try:
-            resp = self._http.post("/api/bot/emergency")
-            if resp.status_code == 200:
-                rdata = resp.json()
-                self._bot_running = False
-                self._update_bot_buttons()
-                self._mode_badge.configure(
-                    text="  ⚠ EMERGENCY  ", fg_color="#3b1219",
-                    text_color=ACCENT_RED)
-                liq = len(rdata.get("liquidated", []))
-                self._append_feed({
-                    "agent": "system", "action": "emergency_stop",
-                    "thought": f"Emergency stop executed. "
-                               f"Liquidated {liq} positions.",
-                })
-                self._append_log({
-                    "agent": "system", "action": "emergency_stop",
-                    "thought": f"Emergency stop. {liq} positions liquidated.",
-                })
-        except Exception as e:
-            self._append_feed({
-                "agent": "system", "action": "error",
-                "thought": f"Emergency stop failed: {e}",
-            })
+
+        self._kill_btn.configure(state="disabled")
+
+        def _work() -> None:
+            rdata = None
+            liq = 0
+            err_msg = ""
+            try:
+                resp = self._http.post("/api/bot/emergency")
+                if resp.status_code == 200:
+                    rdata = resp.json()
+                    liq = len(rdata.get("liquidated", []))
+            except Exception as e:
+                err_msg = str(e)
+
+            def _update() -> None:
+                self._kill_btn.configure(state="normal")
+                if rdata is not None:
+                    self._bot_running = False
+                    self._update_bot_buttons()
+                    self._mode_badge.configure(
+                        text="  ⚠ EMERGENCY  ", fg_color="#3b1219",
+                        text_color=ACCENT_RED)
+                    self._append_feed({
+                        "agent": "system", "action": "emergency_stop",
+                        "thought": f"Emergency stop executed. "
+                                   f"Liquidated {liq} positions.",
+                    })
+                    self._append_log({
+                        "agent": "system", "action": "emergency_stop",
+                        "thought": f"Emergency stop. {liq} positions liquidated.",
+                    })
+                else:
+                    self._append_feed({
+                        "agent": "system", "action": "error",
+                        "thought": f"Emergency stop failed: {err_msg}",
+                    })
+
+            self.after(0, _update)
+
+        threading.Thread(target=_work, daemon=True).start()
 
     # ==================================================================
     # Cleanup

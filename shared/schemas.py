@@ -53,6 +53,7 @@ class Timeframe(str, enum.Enum):
     DAY_1 = "1Day"
     WEEK_1 = "1Week"
     MONTH_1 = "1Month"
+    YEAR_1 = "1Year"
 
 
 # ---------------------------------------------------------------------------

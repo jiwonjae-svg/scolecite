@@ -52,6 +52,7 @@ _ALPACA_TF_MAP = {
     Timeframe.DAY_1: "1Day",
     Timeframe.WEEK_1: "1Week",
     Timeframe.MONTH_1: "1Month",
+    Timeframe.YEAR_1: "1Day",  # 1Y uses daily candles with long lookback
 }
 
 # How far back to look for each timeframe
@@ -63,6 +64,7 @@ _LOOKBACK_MAP = {
     Timeframe.DAY_1: timedelta(days=90),
     Timeframe.WEEK_1: timedelta(days=365),
     Timeframe.MONTH_1: timedelta(days=730),
+    Timeframe.YEAR_1: timedelta(days=365),
 }
 
 
@@ -90,6 +92,9 @@ class TradingEngine:
         self._candle_cache: dict[tuple[str, str], tuple[datetime, list[MarketCandle]]] = {}
         self._cache_ttl = timedelta(minutes=2)  # cache freshness
 
+        # All tradable ticker symbols (loaded once at startup)
+        self._all_tickers: list[str] = []
+
     async def start(self) -> None:
         """Initialise HTTP clients."""
         self._http = httpx.AsyncClient(
@@ -102,11 +107,40 @@ class TradingEngine:
             headers=self._headers,
             timeout=30.0,
         )
+        await self._load_all_tickers()
         await broadcast_thought(
             "engine", "start",
             f"Trading engine started (mode={settings.TRADING_MODE}, "
             f"base_url={self._base_url})",
         )
+
+    async def _load_all_tickers(self) -> None:
+        """Load all tradable US equity tickers from Alpaca (once)."""
+        if self._all_tickers:
+            return
+        try:
+            resp = await self._http.get(  # type: ignore[union-attr]
+                "/v2/assets",
+                params={"status": "active", "asset_class": "us_equity"},
+            )
+            if resp.status_code == 200:
+                assets = resp.json()
+                self._all_tickers = sorted(
+                    a["symbol"] for a in assets
+                    if a.get("tradable") and a.get("symbol")
+                )
+                logger.info("loaded_tickers", count=len(self._all_tickers))
+            else:
+                logger.warning("ticker_load_failed", status=resp.status_code)
+        except Exception as e:
+            logger.warning("ticker_load_error", error=str(e))
+
+    def search_tickers(self, query: str, limit: int = 20) -> list[str]:
+        """Filter in-memory ticker list by prefix (case-insensitive)."""
+        if not query:
+            return self._all_tickers[:limit]
+        q = query.upper()
+        return [t for t in self._all_tickers if t.startswith(q)][:limit]
 
     async def stop(self) -> None:
         if self._http:

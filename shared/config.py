@@ -14,11 +14,47 @@ import os
 from pathlib import Path
 from functools import lru_cache
 
+from typing import Any
+
 from pydantic_settings import BaseSettings
 from pydantic import Field
 
 
 _ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+
+# Mapping: settings.json key → Settings class attribute name
+_RUNTIME_TO_CONFIG: dict[str, str] = {
+    "trading_mode": "TRADING_MODE",
+    "max_position_percent": "MAX_POSITION_PERCENT",
+    "max_drawdown_percent": "MAX_DRAWDOWN_PERCENT",
+    "daily_loss_limit_percent": "DAILY_LOSS_LIMIT_PERCENT",
+    "strategy_update_interval_min": "STRATEGY_UPDATE_INTERVAL_MIN",
+    "grok_scan_interval_min": "GROK_SCAN_INTERVAL_MIN",
+    "allow_extended_hours": "ALLOW_EXTENDED_HOURS",
+    "price_change_threshold_pct": "PRICE_CHANGE_THRESHOLD_PCT",
+    "volume_spike_multiplier": "VOLUME_SPIKE_MULTIPLIER",
+    "sentiment_drop_threshold_pct": "SENTIMENT_DROP_THRESHOLD_PCT",
+    "individual_drawdown_pct": "INDIVIDUAL_DRAWDOWN_PCT",
+    "daily_ai_budget_usd": "DAILY_AI_BUDGET_USD",
+    "enable_prompt_caching": "ENABLE_PROMPT_CACHING",
+    "consecutive_stop_loss_pause": "CONSECUTIVE_STOP_LOSS_PAUSE",
+    "vix_panic_threshold": "VIX_PANIC_THRESHOLD",
+    "dynamic_universe_size": "DYNAMIC_UNIVERSE_SIZE",
+    "enable_dynamic_universe": "ENABLE_DYNAMIC_UNIVERSE",
+    "high_confidence_threshold": "HIGH_CONFIDENCE_THRESHOLD",
+    "low_confidence_threshold": "LOW_CONFIDENCE_THRESHOLD",
+    "high_confidence_position_mult": "HIGH_CONFIDENCE_POSITION_MULT",
+    "low_confidence_position_mult": "LOW_CONFIDENCE_POSITION_MULT",
+    "display_timezone": "DISPLAY_TIMEZONE",
+    "db_backup_enabled": "DB_BACKUP_ENABLED",
+    "db_backup_dir": "DB_BACKUP_DIR",
+    "social_noise_filter_enabled": "SOCIAL_NOISE_FILTER_ENABLED",
+    "low_reliability_weight": "LOW_RELIABILITY_WEIGHT",
+    "enable_adaptive_stoploss": "ENABLE_ADAPTIVE_STOPLOSS",
+    "adaptive_stoploss_hard_cap_pct": "ADAPTIVE_STOPLOSS_HARD_CAP_PCT",
+    "universe_min_market_cap_usd": "UNIVERSE_MIN_MARKET_CAP_USD",
+    "universe_min_volume_usd": "UNIVERSE_MIN_VOLUME_USD",
+}
 
 
 class Settings(BaseSettings):
@@ -177,6 +213,26 @@ class Settings(BaseSettings):
         description="Weight for low-reliability social data in strategy (0-1)",
     )
 
+    # ---- AI Adaptive Stop-Loss ----
+    ENABLE_ADAPTIVE_STOPLOSS: bool = Field(
+        default=False,
+        description="Let AI set stop-loss based on ATR instead of fixed %",
+    )
+    ADAPTIVE_STOPLOSS_HARD_CAP_PCT: float = Field(
+        default=5.0,
+        description="Hard cap: AI stop-loss can never exceed this %",
+    )
+
+    # ---- Universe Filtering ----
+    UNIVERSE_MIN_MARKET_CAP_USD: float = Field(
+        default=1_000_000_000,
+        description="Min market cap (USD) for dynamic universe candidates",
+    )
+    UNIVERSE_MIN_VOLUME_USD: float = Field(
+        default=5_000_000,
+        description="Min daily trading volume (USD) for dynamic universe candidates",
+    )
+
     @property
     def is_paper(self) -> bool:
         return self.TRADING_MODE.lower() == "paper"
@@ -193,7 +249,38 @@ class Settings(BaseSettings):
         extra = "ignore"
 
 
+def _overlay_runtime(s: Settings) -> None:
+    """Overlay values from settings.json onto the Settings instance.
+
+    This makes all existing ``settings.FIELD_NAME`` callers transparently
+    receive the runtime-managed values from the Settings tab instead of
+    the (possibly stale) .env defaults.  Only available server-side;
+    silently skipped on the client where ``server.core`` is absent.
+    """
+    try:
+        from server.core.settings_manager import get_settings_manager  # noqa: WPS433
+        data: dict[str, Any] = get_settings_manager().get_all()
+        for rt_key, cfg_attr in _RUNTIME_TO_CONFIG.items():
+            if rt_key in data:
+                object.__setattr__(s, cfg_attr, data[rt_key])
+    except (ImportError, Exception):
+        pass  # client-side or settings_manager not ready yet
+
+
 @lru_cache()
 def get_settings() -> Settings:
-    """Singleton settings loader."""
-    return Settings()
+    """Singleton settings loader — env vars overlaid by settings.json."""
+    s = Settings()
+    _overlay_runtime(s)
+    return s
+
+
+def refresh_runtime() -> None:
+    """Re-read settings.json and push updated values into the cached
+    Settings singleton.  Call this after every ``PUT /api/settings``.
+    """
+    try:
+        s = get_settings()
+        _overlay_runtime(s)
+    except Exception:
+        pass

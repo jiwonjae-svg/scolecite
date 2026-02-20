@@ -415,6 +415,9 @@ class GrokFastClient:
             "- Upcoming or recent earnings\n"
             "- Sector rotation signals\n"
             "- Unusual volume or momentum\n\n"
+            "HARD FILTERS (exclude any ticker that fails these):\n"
+            f"- Market cap must be >= ${settings.UNIVERSE_MIN_MARKET_CAP_USD:,.0f}\n"
+            f"- Daily trading volume must be >= ${settings.UNIVERSE_MIN_VOLUME_USD:,.0f}\n\n"
             f"Current watchlist: {current_symbols}\n"
             f"Market context: {market_context[:2000]}\n\n"
             "Return JSON array: [{symbol: str, reason: str, sector: str, score: float(0-1), "
@@ -802,8 +805,17 @@ class OpusClient:
             f"MAX_POSITION={settings.MAX_POSITION_PERCENT}%, "
             f"MAX_DRAWDOWN={settings.MAX_DRAWDOWN_PERCENT}%, "
             f"DAILY_LOSS_LIMIT={settings.DAILY_LOSS_LIMIT_PERCENT}%.\n"
+            f"ADAPTIVE_STOPLOSS={'ENABLED' if settings.ENABLE_ADAPTIVE_STOPLOSS else 'DISABLED'}"
+            f"{f', HARD_CAP={settings.ADAPTIVE_STOPLOSS_HARD_CAP_PCT}%' if settings.ENABLE_ADAPTIVE_STOPLOSS else ''}.\n"
             "If confidence is below 0.6, strongly prefer holding. "
             "Always justify every trade with clear reasoning."
+            + (
+                "\n\nSTOP-LOSS RULE: When Adaptive Stop-Loss is ENABLED, "
+                "analyse each position's ATR (Average True Range) to set a dynamic stop-loss. "
+                f"The stop-loss distance MUST NEVER exceed {settings.ADAPTIVE_STOPLOSS_HARD_CAP_PCT}% "
+                "from entry price (hard cap)."
+                if settings.ENABLE_ADAPTIVE_STOPLOSS else ""
+            )
         )
 
     @staticmethod

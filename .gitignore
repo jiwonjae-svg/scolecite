@@ -66,6 +66,10 @@ htmlcov/
 .mypy_cache/
 .pyright/
 
+# ---- Runtime Settings ----
+settings.json
+settings_history.log
+
 # ---- Misc ----
 repomix-output.xml
 *.bak
