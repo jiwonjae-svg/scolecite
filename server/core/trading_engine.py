@@ -95,6 +95,10 @@ class TradingEngine:
         # All tradable ticker symbols (loaded once at startup)
         self._all_tickers: list[str] = []
 
+        # Snapshot cache: {symbol: (timestamp, MarketSnapshot)}
+        self._snapshot_cache: dict[str, tuple[datetime, MarketSnapshot]] = {}
+        self._snapshot_ttl = timedelta(seconds=30)  # cache for 30s
+
     async def start(self) -> None:
         """Initialise HTTP clients."""
         self._http = httpx.AsyncClient(
@@ -153,7 +157,13 @@ class TradingEngine:
     # ------------------------------------------------------------------
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=15))
     async def get_snapshot(self, symbol: str) -> MarketSnapshot:
-        """Get latest quote + recent candles for a symbol."""
+        """Get latest quote + recent candles for a symbol (cached 30s)."""
+        # Check snapshot cache
+        if symbol in self._snapshot_cache:
+            cached_time, cached_snap = self._snapshot_cache[symbol]
+            if datetime.utcnow() - cached_time < self._snapshot_ttl:
+                return cached_snap
+
         if not self._data_http:
             return MarketSnapshot(symbol=symbol, price=0.0)
 
@@ -205,7 +215,7 @@ class TradingEngine:
                 sum(c.volume for c in candles) // len(candles) if candles else 0
             )
 
-            return MarketSnapshot(
+            snap = MarketSnapshot(
                 symbol=symbol,
                 price=price,
                 change_pct=change_pct,
@@ -213,6 +223,8 @@ class TradingEngine:
                 avg_volume=avg_vol,
                 candles=candles,
             )
+            self._snapshot_cache[symbol] = (datetime.utcnow(), snap)
+            return snap
         except Exception as e:
             logger.warning("snapshot_failed", symbol=symbol, error=str(e))
             return MarketSnapshot(symbol=symbol, price=0.0)

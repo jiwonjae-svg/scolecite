@@ -50,6 +50,7 @@ from server.core.ai_clients import (
 from server.core.mcp_server import MCPServer
 from server.core.trading_engine import TradingEngine
 from server.core.risk_manager import RiskManager
+from server.core.ws_streamer import AlpacaWSStreamer
 from server.database import (
     async_session_factory,
     backup_sqlite_db,
@@ -58,7 +59,7 @@ from server.database import (
     ReviewRecord,
     StrategyRecord,
 )
-from server.utils.logging import broadcast_thought, get_logger
+from server.utils.logging import broadcast_thought, get_logger, register_thought_callback
 
 logger = get_logger("orchestrator")
 settings = get_settings()
@@ -78,6 +79,7 @@ class Orchestrator:
         self.opus = OpusClient()
         self.engine = TradingEngine(self.risk_manager)
         self.mcp = MCPServer(self.grok_fast, self.engine, self.risk_manager)
+        self.ws_streamer = AlpacaWSStreamer(callback=self._on_ws_price_update)
 
         # State
         self.status: BotStatus = BotStatus.STOPPED
@@ -98,6 +100,9 @@ class Orchestrator:
         # SSE event queue for broadcasting to clients
         self._sse_queues: list[asyncio.Queue] = []
 
+        # Bridge broadcast_thought → SSE so clients see AI thinking
+        register_thought_callback(self._on_ai_thought)
+
         # Control
         self._tasks: list[asyncio.Task] = []
         self._last_universe_refresh: Optional[datetime] = None
@@ -115,6 +120,10 @@ class Orchestrator:
         await self.engine.start()
         self.status = BotStatus.RUNNING
 
+        # Start WebSocket streamer for real-time prices
+        await self.ws_streamer.start()
+        await self.ws_streamer.subscribe(self.tracked_symbols)
+
         await broadcast_thought("orchestrator", "start", "Bot started — launching AI loops")
 
         self._tasks = [
@@ -127,6 +136,7 @@ class Orchestrator:
     async def stop(self) -> None:
         """Gracefully stop all loops."""
         self.status = BotStatus.STOPPED
+        await self.ws_streamer.stop()
         for task in self._tasks:
             task.cancel()
         self._tasks.clear()
@@ -166,6 +176,10 @@ class Orchestrator:
                 dead.append(q)
         for q in dead:
             self._sse_queues.remove(q)
+
+    async def _on_ai_thought(self, log_entry: dict) -> None:
+        """Forward AI thought broadcasts to SSE subscribers."""
+        await self._push_sse("ai_thinking", log_entry)
 
     # ------------------------------------------------------------------
     # Loop 1: Data Collection (Grok Fast)
@@ -230,16 +244,27 @@ class Orchestrator:
                     if isinstance(r, AIInsight):
                         insights.append(r)
 
-                # Grok Fast social sentiment (sequential for rate limits)
-                for sym in self.tracked_symbols[:5]:
-                    try:
-                        social = await self.grok_fast.analyse_social(
-                            f"Latest social media discussion about ${sym} stock",
-                            sym,
-                        )
-                        insights.append(social)
-                    except Exception as e:
-                        logger.warning("grok_social_error", symbol=sym, error=str(e))
+                # Grok Fast social sentiment (parallel with rate-limit semaphore)
+                social_sem = asyncio.Semaphore(3)  # max 3 concurrent API calls
+
+                async def _social_task(sym: str) -> Optional[AIInsight]:
+                    async with social_sem:
+                        try:
+                            return await self.grok_fast.analyse_social(
+                                f"Latest social media discussion about ${sym} stock",
+                                sym,
+                            )
+                        except Exception as e:
+                            logger.warning("grok_social_error", symbol=sym, error=str(e))
+                            return None
+
+                social_results = await asyncio.gather(
+                    *[_social_task(sym) for sym in self.tracked_symbols[:5]],
+                    return_exceptions=True,
+                )
+                for r in social_results:
+                    if isinstance(r, AIInsight):
+                        insights.append(r)
 
                 self.latest_insights = insights
 
@@ -523,8 +548,32 @@ class Orchestrator:
                 )
                 await self._push_sse("universe", {"symbols": self.tracked_symbols})
 
+                # Re-subscribe WebSocket to new universe
+                await self.ws_streamer.subscribe(self.tracked_symbols)
+
         except Exception as e:
             logger.warning("universe_refresh_failed", error=str(e))
+
+    async def _on_ws_price_update(self, update: dict) -> None:
+        """Handle a real-time price update from Alpaca WebSocket."""
+        symbol = update.get("symbol", "")
+        price = update.get("price", 0.0)
+        if not symbol or not price:
+            return
+
+        # Update latest_market cache
+        if symbol in self.latest_market:
+            self.latest_market[symbol]["price"] = price
+        else:
+            self.latest_market[symbol] = {"price": price, "change_pct": 0.0}
+
+        # Push real-time update to clients via SSE
+        await self._push_sse("market_data", {
+            "symbol": symbol,
+            "price": price,
+            "timestamp": update.get("timestamp", ""),
+            "realtime": True,
+        })
 
     # ------------------------------------------------------------------
     # Auto Trade Journal

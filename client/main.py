@@ -31,6 +31,7 @@ import customtkinter as ctk
 import httpx
 import matplotlib
 import pytz
+import re
 
 matplotlib.use("Agg")  # non-interactive backend
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -64,6 +65,43 @@ FONT_SUBTITLE = ("Pretendard", 11)
 FONT_BIG_NUM = ("JetBrains Mono", 20, "bold")
 CORNER_R = 10
 PAD = 14
+
+# ---------------------------------------------------------------------------
+# K / M / B / T numeric helpers
+# ---------------------------------------------------------------------------
+_SUFFIX_MAP = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
+_SUFFIX_RE = re.compile(
+    r"^\s*([+-]?\d+(?:\.\d+)?)\s*([KkMmBbTt])?\s*$"
+)
+
+
+def parse_human_number(text: str) -> float | None:
+    """Parse '10B', '5.5M', '300K', '1.2T' or plain numbers. Returns None on failure."""
+    m = _SUFFIX_RE.match(text.strip())
+    if not m:
+        return None
+    value = float(m.group(1))
+    suffix = m.group(2)
+    if suffix:
+        value *= _SUFFIX_MAP[suffix.upper()]
+    return value
+
+
+def format_human_number(value: float) -> str:
+    """Format large numbers: 1_000_000_000 → '1B', 5_500_000 → '5.5M'."""
+    abs_val = abs(value)
+    sign = "-" if value < 0 else ""
+    if abs_val >= 1e12:
+        return f"{sign}{abs_val / 1e12:.4g}T"
+    if abs_val >= 1e9:
+        return f"{sign}{abs_val / 1e9:.4g}B"
+    if abs_val >= 1e6:
+        return f"{sign}{abs_val / 1e6:.4g}M"
+    if abs_val >= 1e3:
+        return f"{sign}{abs_val / 1e3:.4g}K"
+    if abs_val == int(abs_val):
+        return f"{sign}{int(abs_val)}"
+    return f"{sign}{value:.4g}"
 
 # ---------------------------------------------------------------------------
 # Connection config
@@ -392,11 +430,40 @@ class TradingBotApp(ctk.CTk):
         sym_card.pack(fill="x", pady=(0, PAD))
         _heading(sym_card, text="Universe").pack(
             anchor="w", padx=PAD, pady=(PAD, 6))
-        self._universe_frame = ctk.CTkFrame(sym_card, fg_color="transparent")
-        self._universe_frame.pack(fill="x", padx=PAD, pady=(0, PAD))
-        self._universe_buttons: list[ctk.CTkButton] = []
-        _label(self._universe_frame, text="Loading…", font=FONT_MONO_SM,
-               text_color=TEXT_SECONDARY).pack(anchor="w")
+
+        # Horizontal scrollable frame for universe tickers
+        self._universe_canvas = tk.Canvas(
+            sym_card, height=32, bg=BG_WIDGET,
+            highlightthickness=0, bd=0)
+        self._universe_canvas.pack(fill="x", padx=PAD, pady=(0, 4))
+        self._universe_inner = ctk.CTkFrame(
+            self._universe_canvas, fg_color="transparent")
+        self._universe_canvas_window = self._universe_canvas.create_window(
+            (0, 0), window=self._universe_inner, anchor="nw")
+        self._universe_inner.bind(
+            "<Configure>",
+            lambda e: self._universe_canvas.configure(
+                scrollregion=self._universe_canvas.bbox("all")))
+        # Mouse wheel horizontal scroll
+        self._universe_canvas.bind(
+            "<MouseWheel>",
+            lambda e: self._universe_canvas.xview_scroll(
+                -1 * (e.delta // 120), "units"))
+        self._universe_hscroll = ctk.CTkScrollbar(
+            sym_card, orientation="horizontal",
+            command=self._universe_canvas.xview,
+            height=8, fg_color=BG_WIDGET,
+            button_color=BORDER_SUBTLE,
+            button_hover_color=TEXT_SECONDARY,
+        )
+        self._universe_hscroll.pack(fill="x", padx=PAD, pady=(0, PAD + 4))
+        self._universe_canvas.configure(xscrollcommand=self._universe_hscroll.set)
+
+        self._universe_buttons: dict[str, ctk.CTkButton] = {}
+        self._universe_symbols: list[str] = []
+
+        _label(self._universe_inner, text="Loading…", font=FONT_MONO_SM,
+               text_color=TEXT_SECONDARY).pack(side="left")
 
     def _check_sidebar_scroll(self) -> None:
         """Show scrollbar only when sidebar content overflows."""
@@ -537,6 +604,11 @@ class TradingBotApp(ctk.CTk):
         tw.tag_configure("system", foreground=TEXT_SECONDARY)
         tw.tag_configure("error", foreground=ACCENT_RED)
         tw.tag_configure("ts", foreground=TEXT_SECONDARY)
+        tw.tag_configure("thinking", foreground=ACCENT_GOLD, font=FONT_MONO_SM)
+        tw.tag_configure("streaming", foreground=TEXT_SECONDARY, font=FONT_MONO_SM)
+
+        # Track AI streaming state (for line-by-line reasoning display)
+        self._ai_streaming_agent: Optional[str] = None
 
     # ── AI Strategy tab ──
     def _build_tab_strategy(self, tab: ctk.CTkFrame) -> None:
@@ -820,6 +892,8 @@ class TradingBotApp(ctk.CTk):
         self._mode_switch.pack(side="right")
         self._settings_fields["trading_mode"] = self._mode_switch_var
 
+        ctk.CTkFrame(s1, fg_color="transparent", height=PAD).pack(fill="x")
+
         # ──────────────────────────────────────────────────────────────
         # SECTION 2: Risk Management
         # ──────────────────────────────────────────────────────────────
@@ -838,21 +912,16 @@ class TradingBotApp(ctk.CTk):
         for key, label_text, lo, hi in risk_fields:
             self._add_number_field(s2, key, label_text, lo, hi)
 
-        # ──────────────────────────────────────────────────────────────
-        # SECTION 2b: AI Adaptive Stop-Loss
-        # ──────────────────────────────────────────────────────────────
-        s2b = _card(outer)
-        s2b.pack(fill="x", pady=(0, 10))
-        _heading(s2b, text="AI Adaptive Stop-Loss").pack(
-            anchor="w", padx=PAD, pady=(PAD, 6))
-        _label(s2b, text="AI uses ATR-based stop-loss instead of fixed %.",
+        # Adaptive stop-loss (merged into Risk Management)
+        _label(s2, text="AI uses ATR-based stop-loss instead of fixed %.",
                font=FONT_SMALL, text_color=TEXT_SECONDARY).pack(
-            anchor="w", padx=PAD, pady=(0, 4))
-
-        self._add_toggle_field(s2b, "enable_adaptive_stoploss",
+            anchor="w", padx=PAD, pady=(8, 4))
+        self._add_toggle_field(s2, "enable_adaptive_stoploss",
                                "Enable Adaptive Stop-Loss")
-        self._add_number_field(s2b, "adaptive_stoploss_hard_cap_pct",
+        self._add_number_field(s2, "adaptive_stoploss_hard_cap_pct",
                                "Hard Cap — Max Stop-Loss (%)", 0.5, 50.0)
+
+        ctk.CTkFrame(s2, fg_color="transparent", height=PAD).pack(fill="x")
 
         # ──────────────────────────────────────────────────────────────
         # SECTION 3: AI Model Pairing
@@ -881,6 +950,8 @@ class TradingBotApp(ctk.CTk):
         for key, label_text in ai_roles:
             self._add_dropdown_field(s3, key, label_text, model_display_names)
 
+        ctk.CTkFrame(s3, fg_color="transparent", height=PAD).pack(fill="x")
+
         # ──────────────────────────────────────────────────────────────
         # SECTION 4: Ticker Universe
         # ──────────────────────────────────────────────────────────────
@@ -890,7 +961,7 @@ class TradingBotApp(ctk.CTk):
 
         dyn_row = ctk.CTkFrame(s4, fg_color="transparent")
         dyn_row.pack(fill="x", padx=PAD, pady=(0, 6))
-        _label(dyn_row, text="Dynamic Universe (Grok auto-select)",
+        _label(dyn_row, text="Dynamic Universe (AI auto-select)",
                font=FONT_SMALL, text_color=TEXT_SECONDARY).pack(side="left")
         self._dyn_universe_var = ctk.StringVar(value="on")
         self._dyn_universe_switch = ctk.CTkSwitch(
@@ -908,16 +979,43 @@ class TradingBotApp(ctk.CTk):
                                "Universe Size (tickers)", 1, 100)
 
         ticker_row = ctk.CTkFrame(s4, fg_color="transparent")
-        ticker_row.pack(fill="x", padx=PAD, pady=(0, PAD))
-        _label(ticker_row, text="Fixed Tickers (comma-separated)",
-               font=FONT_SMALL, text_color=TEXT_SECONDARY).pack(anchor="w")
+        ticker_row.pack(fill="x", padx=PAD, pady=(0, 4))
+        self._fixed_tickers_label = _label(
+            ticker_row, text="Fixed Tickers", font=FONT_SMALL,
+            text_color=TEXT_SECONDARY)
+        self._fixed_tickers_label.pack(anchor="w")
+
+        # Tag display area (flow-wrap buttons)
+        self._ticker_tags_frame = ctk.CTkFrame(ticker_row, fg_color="transparent")
+        self._ticker_tags_frame.pack(fill="x", pady=(2, 0))
+        self._ticker_tags: list[str] = []  # list of added tickers
+        self._ticker_tag_widgets: dict[str, ctk.CTkFrame] = {}
+
+        # Input entry for adding new tickers
         self._fixed_tickers_entry = ctk.CTkEntry(
-            ticker_row, placeholder_text="AAPL, TSLA, NVDA",
+            ticker_row, placeholder_text="Type ticker + Enter…",
             font=FONT_MONO, fg_color=BG_INPUT, text_color=TEXT_PRIMARY,
             border_color=BORDER_SUBTLE, corner_radius=6, height=32,
             state="disabled",
         )
         self._fixed_tickers_entry.pack(fill="x", pady=(4, 0))
+        self._fixed_tickers_entry.bind("<Return>", self._on_ticker_tag_enter)
+        self._fixed_tickers_entry.bind("<KeyRelease>", self._on_ticker_tag_validate)
+        # Focus highlight
+        self._fixed_tickers_entry.bind(
+            "<FocusIn>",
+            lambda e: self._fixed_tickers_label.configure(text_color=TEXT_HEADING))
+        self._fixed_tickers_entry.bind(
+            "<FocusOut>",
+            lambda e: self._fixed_tickers_label.configure(text_color=TEXT_SECONDARY))
+
+        # Warning label below entry
+        self._ticker_warning_label = _label(
+            ticker_row, text="", font=("Pretendard", 10),
+            text_color=ACCENT_RED)
+        self._ticker_warning_label.pack(anchor="w", pady=(2, 0))
+        self._ticker_warning_active = False
+
         self._settings_fields["fixed_tickers"] = self._fixed_tickers_entry
 
         _label(s4, text="Universe Filtering (applied by Opus CEO)",
@@ -927,6 +1025,8 @@ class TradingBotApp(ctk.CTk):
                                "Min Market Cap ($)", 0, 1e15)
         self._add_number_field(s4, "universe_min_volume_usd",
                                "Min Daily Volume ($)", 0, 1e12)
+
+        ctk.CTkFrame(s4, fg_color="transparent", height=PAD).pack(fill="x")
 
         # ──────────────────────────────────────────────────────────────
         # SECTION 5: Chart Settings
@@ -940,6 +1040,8 @@ class TradingBotApp(ctk.CTk):
                                  "Default Timeframe", tf_options)
         self._add_number_field(s5, "default_candle_count",
                                "Candle Count", 10, 1000)
+
+        ctk.CTkFrame(s5, fg_color="transparent", height=PAD).pack(fill="x")
 
         # ──────────────────────────────────────────────────────────────
         # SECTION 6: Timezone
@@ -980,11 +1082,16 @@ class TradingBotApp(ctk.CTk):
             state="disabled",
         )
         self._tz_combo.pack(side="right")
+        # Make timezone combo read-only (prevent text editing)
+        try:
+            self._tz_combo._entry.configure(state="readonly")
+        except (AttributeError, tk.TclError):
+            pass
         self._settings_fields["display_timezone"] = self._tz_var
 
         _label(s6, text="Type any pytz timezone name or pick from the list above.",
                font=("Pretendard", 10), text_color=TEXT_SECONDARY).pack(
-            anchor="w", padx=PAD, pady=(0, 6))
+            anchor="w", padx=PAD, pady=(0, PAD))
 
         # ──────────────────────────────────────────────────────────────
         # SECTION 7: Advanced (Volatility / Confidence / Social)
@@ -1012,7 +1119,7 @@ class TradingBotApp(ctk.CTk):
         self._add_number_field(s7, "strategy_update_interval_min",
                                "Strategy Review Interval (min)", 1, 1440)
         self._add_number_field(s7, "grok_scan_interval_min",
-                               "Grok Scan Interval (min)", 1, 1440)
+                               "Scan Interval (min)", 1, 1440)
 
         # Toggles
         for toggle_key, toggle_label in [
@@ -1022,6 +1129,8 @@ class TradingBotApp(ctk.CTk):
             ("social_noise_filter_enabled", "Social Noise Filter"),
         ]:
             self._add_toggle_field(s7, toggle_key, toggle_label)
+
+        ctk.CTkFrame(s7, fg_color="transparent", height=PAD).pack(fill="x")
 
         # ──────────────────────────────────────────────────────────────
         # SECTION 8: API Key Input (hybrid) + Read-only status
@@ -1086,7 +1195,10 @@ class TradingBotApp(ctk.CTk):
             status_lbl.pack(side="left", padx=(8, 0))
             self._key_status_labels[key_name] = status_lbl
 
-        ctk.CTkFrame(s8, fg_color="transparent", height=8).pack()
+        ctk.CTkFrame(s8, fg_color="transparent", height=PAD).pack(fill="x")
+
+        # Bottom spacer for overall settings content
+        ctk.CTkFrame(outer, fg_color="transparent", height=40).pack(fill="x")
 
         # Initial load
         self.after(600, self._load_settings_from_server)
@@ -1094,12 +1206,19 @@ class TradingBotApp(ctk.CTk):
 
     # ── Settings tab: helpers ──────────────────────────────────────────
 
+    # Keys whose values may use K/M/B/T suffix notation
+    _HUMAN_NUMBER_KEYS = {
+        "universe_min_market_cap_usd", "universe_min_volume_usd",
+        "daily_ai_budget_usd",
+    }
+
     def _add_number_field(self, parent: Any, key: str, label_text: str,
                           lo: float, hi: float) -> None:
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=PAD, pady=2)
-        _label(row, text=label_text, font=FONT_SMALL,
-               text_color=TEXT_SECONDARY).pack(side="left")
+        lbl = _label(row, text=label_text, font=FONT_SMALL,
+                     text_color=TEXT_SECONDARY)
+        lbl.pack(side="left")
         var = ctk.StringVar(value="")
         entry = ctk.CTkEntry(
             row, textvariable=var, width=100, height=28,
@@ -1107,14 +1226,62 @@ class TradingBotApp(ctk.CTk):
             border_color=BORDER_SUBTLE, corner_radius=6, state="disabled",
         )
         entry.pack(side="right")
+        # Focus-highlight: brighten label on focus, dim on blur
+        entry.bind("<FocusIn>",
+                   lambda e, lb=lbl: lb.configure(text_color=TEXT_HEADING))
+        entry.bind("<FocusOut>",
+                   lambda e, lb=lbl: lb.configure(text_color=TEXT_SECONDARY))
+
+        # Input validation: numbers (and optional K/M/B/T suffix)
+        allows_suffix = key in self._HUMAN_NUMBER_KEYS
+        self._bind_number_validation(entry, allows_suffix)
+
+        # Auto-format large numbers on FocusOut for K/M/B/T fields
+        if allows_suffix:
+            entry.bind("<FocusOut>", lambda e, v=var, lb=lbl: (
+                self._auto_format_human_number(v),
+                lb.configure(text_color=TEXT_SECONDARY),
+            ))
+
         self._settings_fields[key] = (var, entry, lo, hi)
+
+    def _bind_number_validation(self, entry: ctk.CTkEntry,
+                                allow_suffix: bool = False) -> None:
+        """Restrict entry to digits, '.', and optionally K/M/B/T."""
+        allowed = set("0123456789.")
+        if allow_suffix:
+            allowed |= set("KkMmBbTt")
+        try:
+            inner = entry._entry
+        except AttributeError:
+            return
+
+        def _filter(event: Any) -> str | None:
+            char = event.char
+            if not char or char in ('\x08', '\x7f', '\r', '\n'):
+                return None  # allow control keys
+            if char not in allowed:
+                return "break"
+            return None
+
+        inner.bind("<KeyPress>", _filter)
+
+    def _auto_format_human_number(self, var: ctk.StringVar) -> None:
+        """Auto-format the value in a StringVar to human-readable (e.g. 1000000 → 1M)."""
+        raw = var.get().strip()
+        if not raw:
+            return
+        num = parse_human_number(raw)
+        if num is not None and abs(num) >= 1000:
+            var.set(format_human_number(num))
 
     def _add_dropdown_field(self, parent: Any, key: str, label_text: str,
                             options: list[str]) -> None:
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=PAD, pady=2)
-        _label(row, text=label_text, font=FONT_SMALL,
-               text_color=TEXT_SECONDARY).pack(side="left")
+        lbl = _label(row, text=label_text, font=FONT_SMALL,
+                     text_color=TEXT_SECONDARY)
+        lbl.pack(side="left")
         var = ctk.StringVar(value=options[0])
         combo = ctk.CTkComboBox(
             row, values=options, variable=var,
@@ -1127,20 +1294,38 @@ class TradingBotApp(ctk.CTk):
             state="disabled",
         )
         combo.pack(side="right")
+        # Make combobox read-only (prevent text editing)
+        try:
+            combo._entry.configure(state="readonly")
+        except (AttributeError, tk.TclError):
+            pass
+        # Focus-highlight on the inner entry of the combobox
+        try:
+            inner = combo._entry
+            inner.bind("<FocusIn>",
+                       lambda e, lb=lbl: lb.configure(text_color=TEXT_HEADING))
+            inner.bind("<FocusOut>",
+                       lambda e, lb=lbl: lb.configure(text_color=TEXT_SECONDARY))
+        except AttributeError:
+            pass
         self._settings_fields[key] = (var, combo)
 
     def _add_toggle_field(self, parent: Any, key: str,
                           label_text: str) -> None:
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=PAD, pady=2)
-        _label(row, text=label_text, font=FONT_SMALL,
-               text_color=TEXT_SECONDARY).pack(side="left")
+        lbl = _label(row, text=label_text, font=FONT_SMALL,
+                     text_color=TEXT_SECONDARY)
+        lbl.pack(side="left")
         var = ctk.StringVar(value="on")
         switch = ctk.CTkSwitch(
             row, text="", variable=var, onvalue="on", offvalue="off",
             fg_color=BG_INPUT, progress_color=ACCENT_CYAN,
             button_color=TEXT_SECONDARY, button_hover_color=TEXT_PRIMARY,
             state="disabled",
+            command=lambda lb=lbl: self.after(
+                50, lambda: lb.configure(text_color=TEXT_HEADING
+                                         if var.get() == "on" else TEXT_SECONDARY)),
         )
         switch.pack(side="right")
         self._settings_fields[key] = (var, switch)
@@ -1161,6 +1346,12 @@ class TradingBotApp(ctk.CTk):
         self._mode_switch.configure(state=new_state)
         self._dyn_universe_switch.configure(state=new_state)
         self._tz_combo.configure(state=new_state)
+        # Keep timezone combo entry read-only even when enabled
+        if self._settings_edit_mode:
+            try:
+                self._tz_combo._entry.configure(state="readonly")
+            except (AttributeError, tk.TclError):
+                pass
 
         # Number / dropdown / toggle fields
         for key, field_data in self._settings_fields.items():
@@ -1183,6 +1374,12 @@ class TradingBotApp(ctk.CTk):
                 elif len(field_data) == 2:
                     _, widget = field_data
                     widget.configure(state=new_state)
+                    # Keep combo entries read-only even when enabled
+                    if isinstance(widget, ctk.CTkComboBox) and self._settings_edit_mode:
+                        try:
+                            widget._entry.configure(state="readonly")
+                        except (AttributeError, tk.TclError):
+                            pass
 
         # API key entries
         for entry in self._api_key_entries.values():
@@ -1200,6 +1397,98 @@ class TradingBotApp(ctk.CTk):
         dyn_on = self._dyn_universe_var.get() == "on"
         self._fixed_tickers_entry.configure(
             state="disabled" if dyn_on else "normal")
+
+    # ── Tag-based ticker input ──
+
+    def _rebuild_ticker_tags(self) -> None:
+        """Rebuild tag widgets from self._ticker_tags list."""
+        for w in self._ticker_tag_widgets.values():
+            w.destroy()
+        self._ticker_tag_widgets.clear()
+
+        can_delete = (self._settings_edit_mode
+                      and self._dyn_universe_var.get() != "on")
+
+        for sym in self._ticker_tags:
+            tag = ctk.CTkFrame(self._ticker_tags_frame, fg_color="#2b3a42",
+                               corner_radius=4)
+            tag.pack(side="left", padx=2, pady=2)
+            _label(tag, text=sym, font=FONT_MONO_SM,
+                   text_color=ACCENT_CYAN).pack(side="left", padx=(6, 0))
+            x_btn = ctk.CTkButton(
+                tag, text="✕", width=18, height=18, font=("Pretendard", 9),
+                fg_color="transparent", hover_color=BG_HOVER,
+                text_color=TEXT_SECONDARY, corner_radius=3,
+                command=lambda s=sym: self._remove_ticker_tag(s),
+            )
+            x_btn.pack(side="left", padx=(2, 4), pady=2)
+            if not can_delete:
+                x_btn.configure(state="disabled")
+            self._ticker_tag_widgets[sym] = tag
+
+    def _remove_ticker_tag(self, symbol: str) -> None:
+        """Remove a ticker tag."""
+        if symbol in self._ticker_tags:
+            self._ticker_tags.remove(symbol)
+            self._rebuild_ticker_tags()
+
+    def _on_ticker_tag_enter(self, event=None) -> None:
+        """Convert entry text into a tag on Enter press."""
+        if self._ticker_warning_active:
+            return  # block adding while warning is active
+        raw = self._fixed_tickers_entry.get().strip().upper()
+        if not raw:
+            return
+        self._ticker_tags.append(raw)
+        self._fixed_tickers_entry.delete(0, "end")
+        self._ticker_warning_label.configure(text="")
+        self._ticker_warning_active = False
+        self._rebuild_ticker_tags()
+        # Auto-focus back to entry for continuous input
+        self._fixed_tickers_entry.focus_set()
+
+    def _on_ticker_tag_validate(self, event=None) -> None:
+        """Live-validate the current input text against cached ticker list."""
+        raw = self._fixed_tickers_entry.get().strip().upper()
+        if not raw:
+            self._ticker_warning_label.configure(text="")
+            self._ticker_warning_active = False
+            return
+
+        # Check for non-alphabetic characters
+        if not raw.isalpha():
+            self._ticker_warning_label.configure(
+                text="⚠ Invalid: only letters allowed")
+            self._ticker_warning_active = True
+            return
+
+        # Check for duplicates
+        if raw in self._ticker_tags:
+            self._ticker_warning_label.configure(
+                text=f"⚠ '{raw}' already added")
+            self._ticker_warning_active = True
+            return
+
+        # Check against cached Alpaca ticker list (async)
+        def _check():
+            try:
+                resp = self._http.get(
+                    "/api/tickers/search", params={"q": raw, "limit": 1})
+                if resp.status_code == 200:
+                    results = resp.json().get("results", [])
+                    if raw not in results:
+                        self.after(0, self._set_ticker_warning,
+                                   f"⚠ '{raw}' not found in Alpaca")
+                        return
+            except Exception:
+                pass
+            self.after(0, self._set_ticker_warning, "")
+
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _set_ticker_warning(self, text: str) -> None:
+        self._ticker_warning_label.configure(text=text)
+        self._ticker_warning_active = bool(text)
 
     # ── Settings tab: load from server ──
 
@@ -1230,18 +1519,31 @@ class TradingBotApp(ctk.CTk):
             elif key == "display_timezone":
                 self._tz_var.set(str(val))
             elif key == "fixed_tickers":
+                # Populate tag-based ticker list
+                if isinstance(val, list):
+                    self._ticker_tags = [t.strip().upper() for t in val if t.strip()]
+                elif isinstance(val, str):
+                    self._ticker_tags = [t.strip().upper()
+                                         for t in val.split(",") if t.strip()]
+                else:
+                    self._ticker_tags = []
                 self._fixed_tickers_entry.configure(state="normal")
                 self._fixed_tickers_entry.delete(0, "end")
-                if isinstance(val, list):
-                    self._fixed_tickers_entry.insert(0, ", ".join(val))
-                else:
-                    self._fixed_tickers_entry.insert(0, str(val))
                 if not self._settings_edit_mode:
                     self._fixed_tickers_entry.configure(state="disabled")
+                self._rebuild_ticker_tags()
             elif isinstance(field_data, tuple):
                 if len(field_data) == 4:
                     var, _, _, _ = field_data
-                    var.set(str(val))
+                    # Display large numbers in human-readable format
+                    try:
+                        num = float(val)
+                        if abs(num) >= 1000:
+                            var.set(format_human_number(num))
+                        else:
+                            var.set(str(val))
+                    except (ValueError, TypeError):
+                        var.set(str(val))
                 elif len(field_data) == 2:
                     var, widget = field_data
                     if isinstance(widget, ctk.CTkSwitch):
@@ -1330,17 +1632,15 @@ class TradingBotApp(ctk.CTk):
             elif key == "display_timezone":
                 patch[key] = self._tz_var.get()
             elif key == "fixed_tickers":
-                raw = self._fixed_tickers_entry.get().strip()
-                tickers = [t.strip().upper() for t in raw.split(",")
-                           if t.strip()]
-                patch[key] = tickers
+                # Read from tag list (not the entry text)
+                patch[key] = list(self._ticker_tags)
             elif isinstance(field_data, tuple):
                 if len(field_data) == 4:
                     var, _, lo, hi = field_data
                     raw_val = var.get().strip()
-                    try:
-                        num = float(raw_val)
-                    except ValueError:
+                    # Support K/M/B/T suffixes (e.g. "10B", "5.5M")
+                    num = parse_human_number(raw_val)
+                    if num is None:
                         errors.append(f"{key}: not a valid number")
                         continue
                     if num < lo or num > hi:
@@ -1669,40 +1969,55 @@ class TradingBotApp(ctk.CTk):
         self._highlight_universe_button(symbol)
 
     def _update_universe_display(self, symbols: list[str]) -> None:
-        """Rebuild the Universe section with clickable ticker buttons."""
-        for w in self._universe_frame.winfo_children():
-            w.destroy()
-        self._universe_buttons.clear()
+        """Delta-update the Universe section — only add/remove changed tickers."""
+        if symbols == self._universe_symbols:
+            return  # identical list, skip re-render entirely
 
-        if not symbols:
-            _label(self._universe_frame, text="—", font=FONT_MONO_SM,
-                   text_color=TEXT_SECONDARY).pack(anchor="w")
-            return
+        old_set = set(self._universe_symbols)
+        new_set = set(symbols)
 
-        # Flow-wrap: pack buttons left-to-right in rows
-        row_frame = ctk.CTkFrame(self._universe_frame, fg_color="transparent")
-        row_frame.pack(fill="x", anchor="w")
+        # Remove tickers no longer in universe
+        for sym in old_set - new_set:
+            btn = self._universe_buttons.pop(sym, None)
+            if btn:
+                btn.destroy()
+
+        # If first render, clear the "Loading…" placeholder
+        if not self._universe_symbols and self._universe_inner.winfo_children():
+            for w in self._universe_inner.winfo_children():
+                if isinstance(w, ctk.CTkLabel):
+                    w.destroy()
+
+        # Add new tickers
         for sym in symbols:
-            is_selected = sym == self._selected_chart_symbol
-            btn = ctk.CTkButton(
-                row_frame, text=sym, width=60, height=24,
-                font=FONT_MONO_SM, corner_radius=4,
-                fg_color="#2b3a42" if is_selected else BG_INPUT,
-                text_color=ACCENT_CYAN if is_selected else TEXT_SECONDARY,
-                hover_color="#2b3a42",
-                command=lambda s=sym: self._on_ticker_click(s),
-            )
-            btn.pack(side="left", padx=2, pady=2)
-            self._universe_buttons.append(btn)
+            if sym not in self._universe_buttons:
+                is_selected = sym == self._selected_chart_symbol
+                btn = ctk.CTkButton(
+                    self._universe_inner, text=sym, width=64, height=26,
+                    font=FONT_MONO_SM, corner_radius=4,
+                    fg_color="#2b3a42" if is_selected else BG_INPUT,
+                    text_color=ACCENT_CYAN if is_selected else TEXT_SECONDARY,
+                    hover_color="#2b3a42",
+                    command=lambda s=sym: self._on_ticker_click(s),
+                )
+                btn.pack(side="left", padx=2, pady=2)
+                self._universe_buttons[sym] = btn
+
+        self._universe_symbols = list(symbols)
 
         if symbols and not self._selected_chart_symbol:
             self._selected_chart_symbol = symbols[0]
             self._highlight_universe_button(symbols[0])
 
+        # No empty state
+        if not symbols:
+            _label(self._universe_inner, text="—", font=FONT_MONO_SM,
+                   text_color=TEXT_SECONDARY).pack(side="left")
+
     def _highlight_universe_button(self, symbol: str) -> None:
         """Highlight the selected universe ticker button."""
-        for btn in self._universe_buttons:
-            if btn.cget("text") == symbol:
+        for sym, btn in self._universe_buttons.items():
+            if sym == symbol:
                 btn.configure(fg_color="#2b3a42", text_color=ACCENT_CYAN)
             else:
                 btn.configure(fg_color=BG_INPUT, text_color=TEXT_SECONDARY)
@@ -1751,6 +2066,8 @@ class TradingBotApp(ctk.CTk):
             elif event_type == "universe":
                 symbols = data.get("symbols", [])
                 self._update_universe_display(symbols)
+            elif event_type == "ai_thinking":
+                self._handle_ai_thinking(data)
         except Exception:
             pass
 
@@ -1970,6 +2287,13 @@ class TradingBotApp(ctk.CTk):
 
     def _append_feed(self, data: dict) -> None:
         """Append insight or log to the data feed with colour tags."""
+        # End any active streaming block before a normal feed entry
+        if self._ai_streaming_agent:
+            self._ai_streaming_agent = None
+            self._feed_text.configure(state="normal")
+            self._feed_text._textbox.insert("end", "\n")
+            self._feed_text.configure(state="disabled")
+
         self._feed_text.configure(state="normal")
         tw = self._feed_text._textbox
 
@@ -2000,6 +2324,53 @@ class TradingBotApp(ctk.CTk):
         tw.insert("end", f"{summary}\n\n", tag)
         tw.see("end")
         self._feed_text.configure(state="disabled")
+
+    def _handle_ai_thinking(self, data: dict) -> None:
+        """Handle real-time AI thinking/streaming SSE events."""
+        action = data.get("action", "")
+        agent = data.get("agent", "system").lower()
+        thought = data.get("thought", "")
+
+        tw = self._feed_text._textbox
+
+        if action == "thinking":
+            # Start of a new thinking block — show indicator
+            self._ai_streaming_agent = agent
+            self._feed_text.configure(state="normal")
+            timestamp = data.get("timestamp", "")[:19]
+            tag = ("grok_fast" if "grok_fast" in agent
+                   else "grok" if "grok" in agent
+                   else "opus" if "opus" in agent or "claude" in agent
+                   else "system")
+            tw.insert("end", f"[{timestamp}]", "ts")
+            tw.insert("end", f" [{agent.upper()}] ", tag)
+            tw.insert("end", f"{thought}\n", "thinking")
+            tw.see("end")
+            self._feed_text.configure(state="disabled")
+
+        elif action == "streaming":
+            # Append streaming tokens inline
+            self._feed_text.configure(state="normal")
+            tw.insert("end", thought, "streaming")
+            tw.see("end")
+            self._feed_text.configure(state="disabled")
+
+        elif action == "done_thinking":
+            # End streaming block with a newline
+            self._ai_streaming_agent = None
+            self._feed_text.configure(state="normal")
+            tw.insert("end", "\n\n")
+            tw.see("end")
+            self._feed_text.configure(state="disabled")
+
+        else:
+            # Other thought actions (tool_call, etc.) — show as feed line
+            self._append_feed({
+                "agent": agent,
+                "thought": thought,
+                "action": action,
+                "timestamp": data.get("timestamp", ""),
+            })
 
     def _append_log(self, data: dict) -> None:
         """Append to the Full Logs tab with syntax highlighting."""

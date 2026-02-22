@@ -61,6 +61,50 @@ _COST_TABLE = {
     "claude-opus": {"input": 0.015, "output": 0.075},
 }
 
+# ---------------------------------------------------------------------------
+# Streaming helpers
+# ---------------------------------------------------------------------------
+async def _stream_openai(
+    client: AsyncOpenAI,
+    model: str,
+    messages: list[dict],
+    max_tokens: int,
+    agent: str,
+) -> tuple[str, dict[str, int]]:
+    """Stream an OpenAI-compatible completion, broadcasting text chunks via SSE."""
+    text_parts: list[str] = []
+    input_tokens = 0
+    output_tokens = 0
+
+    await broadcast_thought(agent, "thinking", "🧠 Thinking…")
+
+    stream = await client.chat.completions.create(
+        model=model,
+        max_tokens=max_tokens,
+        messages=messages,
+        stream=True,
+    )
+    async for chunk in stream:
+        if chunk.choices:
+            delta = chunk.choices[0].delta
+            if delta and delta.content:
+                text_parts.append(delta.content)
+                await broadcast_thought(agent, "streaming", delta.content)
+        if hasattr(chunk, "usage") and chunk.usage:
+            input_tokens = getattr(chunk.usage, "prompt_tokens", 0) or 0
+            output_tokens = getattr(chunk.usage, "completion_tokens", 0) or 0
+
+    full_text = "".join(text_parts)
+    # Fallback token estimate when usage not reported
+    if input_tokens == 0:
+        prompt_text = " ".join(m.get("content", "") for m in messages if isinstance(m.get("content"), str))
+        input_tokens = max(1, len(prompt_text) // 4)
+    if output_tokens == 0:
+        output_tokens = max(1, len(full_text) // 4)
+
+    await broadcast_thought(agent, "done_thinking", "✅ Response complete")
+    return full_text, {"input": input_tokens, "output": output_tokens}
+
 
 def _estimate_cost(model_key: str, input_tokens: int, output_tokens: int) -> float:
     rates = _COST_TABLE.get(model_key, {"input": 0.0, "output": 0.0})
@@ -231,17 +275,11 @@ class GrokFastClient:
             f"News:\n{safe_text}"
         )
 
-        resp = await self._client.chat.completions.create(
-            model=self.MODEL,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
+        text, usage = await _stream_openai(
+            self._client, self.MODEL,
+            [{"role": "user", "content": prompt}],
+            1024, "grok_fast",
         )
-        text = resp.choices[0].message.content or ""
-        usage_data = resp.usage
-        usage = {
-            "input": usage_data.prompt_tokens if usage_data else 0,
-            "output": usage_data.completion_tokens if usage_data else 0,
-        }
         cost = _estimate_cost("grok-fast", usage["input"], usage["output"])
         await _log_usage("grok_fast", self.MODEL, usage["input"], usage["output"], cost, "summarise_news")
 
@@ -287,17 +325,11 @@ class GrokFastClient:
             f"Data:\n{json.dumps(market_data)[:6000]}"
         )
 
-        resp = await self._client.chat.completions.create(
-            model=self.MODEL,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
+        text, usage = await _stream_openai(
+            self._client, self.MODEL,
+            [{"role": "user", "content": prompt}],
+            1024, "grok_fast",
         )
-        text = resp.choices[0].message.content or ""
-        usage_data = resp.usage
-        usage = {
-            "input": usage_data.prompt_tokens if usage_data else 0,
-            "output": usage_data.completion_tokens if usage_data else 0,
-        }
         cost = _estimate_cost("grok-fast", usage["input"], usage["output"])
         await _log_usage("grok_fast", self.MODEL, usage["input"], usage["output"], cost, "analyse_technical")
 
@@ -351,17 +383,11 @@ class GrokFastClient:
             + f"\nPosts:\n{safe_posts}"
         )
 
-        resp = await self._client.chat.completions.create(
-            model=self.MODEL,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
+        text, usage = await _stream_openai(
+            self._client, self.MODEL,
+            [{"role": "user", "content": prompt}],
+            1024, "grok_fast",
         )
-        text = resp.choices[0].message.content or ""
-        usage_data = resp.usage
-        usage = {
-            "input": usage_data.prompt_tokens if usage_data else 0,
-            "output": usage_data.completion_tokens if usage_data else 0,
-        }
         cost = _estimate_cost("grok-fast", usage["input"], usage["output"])
         await _log_usage("grok_fast", self.MODEL, usage["input"], usage["output"], cost, "analyse_social")
 
@@ -424,17 +450,11 @@ class GrokFastClient:
             "source: str}]"
         )
 
-        resp = await self._client.chat.completions.create(
-            model=self.MODEL,
-            max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
+        text, usage = await _stream_openai(
+            self._client, self.MODEL,
+            [{"role": "user", "content": prompt}],
+            2048, "grok_fast",
         )
-        text = resp.choices[0].message.content or ""
-        usage_data = resp.usage
-        usage = {
-            "input": usage_data.prompt_tokens if usage_data else 0,
-            "output": usage_data.completion_tokens if usage_data else 0,
-        }
         cost = _estimate_cost("grok-fast", usage["input"], usage["output"])
         await _log_usage("grok_fast", self.MODEL, usage["input"], usage["output"], cost, "select_universe")
 
@@ -513,17 +533,11 @@ class GrokStrategyClient:
             "Only include hypotheses you have genuine conviction about. Quality over quantity."
         )
 
-        resp = await self._client.chat.completions.create(
-            model=self.MODEL,
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}],
+        text, usage = await _stream_openai(
+            self._client, self.MODEL,
+            [{"role": "user", "content": prompt}],
+            4096, "grok_strategy",
         )
-        text = resp.choices[0].message.content or ""
-        usage_data = resp.usage
-        usage = {
-            "input": usage_data.prompt_tokens if usage_data else 0,
-            "output": usage_data.completion_tokens if usage_data else 0,
-        }
         cost = _estimate_cost("grok-strategy", usage["input"], usage["output"])
         await _log_usage("grok_strategy", self.MODEL, usage["input"], usage["output"], cost, "brainstorm")
 
@@ -673,20 +687,39 @@ class OpusClient:
         total_output = 0
         max_turns = 10
 
+        await broadcast_thought("opus", "thinking", "🧠 Thinking…")
+
         for turn in range(max_turns):
-            resp = await self._client.messages.create(
+            # Use streaming to broadcast reasoning tokens in real-time
+            collected_content: list = []
+            final_text = ""
+            stop_reason = None
+            turn_input = 0
+            turn_output = 0
+
+            async with self._client.messages.stream(
                 model=self.MODEL,
                 max_tokens=4096,
                 system=system_prompt,
                 tools=self.TOOLS,
                 messages=messages,
-            )
+            ) as stream:
+                async for event in stream:
+                    if hasattr(event, "type"):
+                        if event.type == "content_block_delta":
+                            if hasattr(event.delta, "text"):
+                                await broadcast_thought("opus", "streaming", event.delta.text)
 
-            total_input += resp.usage.input_tokens
-            total_output += resp.usage.output_tokens
+                resp = await stream.get_final_message()
+
+            turn_input = resp.usage.input_tokens
+            turn_output = resp.usage.output_tokens
+            total_input += turn_input
+            total_output += turn_output
+            stop_reason = resp.stop_reason
 
             # Check if Opus wants to use tools
-            if resp.stop_reason == "tool_use":
+            if stop_reason == "tool_use":
                 # Process each tool-use block
                 tool_results = []
                 for block in resp.content:
@@ -730,8 +763,8 @@ class OpusClient:
         await _log_usage("opus", self.MODEL, total_input, total_output, cost, "plan_strategy")
 
         await broadcast_thought(
-            "opus", "strategy_complete",
-            "CEO strategy review finished",
+            "opus", "done_thinking",
+            "✅ CEO strategy review finished",
             {"total_input_tokens": total_input, "total_output_tokens": total_output, "cost_usd": cost},
         )
 
@@ -756,16 +789,28 @@ class OpusClient:
         if context_data:
             user_content += f"\n\n[Current context: {json.dumps(context_data, default=str)[:3000]}]"
 
-        resp = await self._client.messages.create(
+        await broadcast_thought("opus", "thinking", "🧠 Thinking…")
+
+        text_parts: list[str] = []
+        async with self._client.messages.stream(
             model=self.MODEL,
             max_tokens=2048,
             system=system,
             messages=[{"role": "user", "content": user_content}],
-        )
-        text = resp.content[0].text if resp.content else ""
+        ) as stream:
+            async for event in stream:
+                if hasattr(event, "type") and event.type == "content_block_delta":
+                    if hasattr(event.delta, "text"):
+                        text_parts.append(event.delta.text)
+                        await broadcast_thought("opus", "streaming", event.delta.text)
+            resp = await stream.get_final_message()
+
+        text = "".join(text_parts) or (resp.content[0].text if resp.content else "")
         usage = {"input": resp.usage.input_tokens, "output": resp.usage.output_tokens}
         cost = _estimate_cost("claude-opus", usage["input"], usage["output"])
         await _log_usage("opus", self.MODEL, usage["input"], usage["output"], cost, "chat")
+
+        await broadcast_thought("opus", "done_thinking", "✅ Response complete")
 
         return {
             "reply": text,

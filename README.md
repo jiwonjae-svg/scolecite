@@ -12,7 +12,7 @@
 <p align="center">
   <strong>Autonomous AI Quant Trading Terminal for the US Stock Market</strong>
   <br />
-  <em>3-Model AI Architecture · Dynamic Universe · Market Fatigue · Auto Journal</em>
+  <em>3-Model AI Architecture · Dynamic Universe · Real-Time WebSocket · AI Streaming · Auto Journal</em>
 </p>
 
 > **⚠️ DISCLAIMER** — This project is for **educational and research purposes only**.
@@ -130,12 +130,15 @@ The system is split into a **FastAPI server** (deployable to Cloud Run) and a **
 | **Social Noise Filter** | Low-reliability sources weighted at 20% to reduce noise |
 | **Prompt Injection Defense** | User chat inputs are sanitized against injection patterns |
 | **AI Chat** | Direct conversation with Opus CEO from the desktop client |
+| **AI Streaming Logging** | Real-time "🧠 Thinking…" display with streamed reasoning in data feed |
 | **Daily AI Budget** | Hard cap on daily AI spend ($50 default), tracked per-call |
 
 ### 📊 Trading & Risk
 | Feature | Description |
 |---------|-------------|
-| **Multi-Timeframe Candles** | 1min, 5min, 15min, 1h, 1d, 1w, 1mo with pandas resampling |
+| **Multi-Timeframe Candles** | 1min, 5min, 15min, 1h, 1d, 1w, 1mo, 1y with pandas resampling |
+| **WebSocket Streaming** | Real-time price updates via Alpaca WebSocket (IEX/SIP) |
+| **Intelligent Caching** | Snapshot cache (30s TTL) + candle cache (2min TTL) for reduced API calls |
 | **Confidence-Based Sizing** | High confidence → larger positions, low → smaller |
 | **Market Fatigue / Rest Mode** | 24h auto-pause after consecutive stop-losses |
 | **VIX Panic Threshold** | Auto risk reduction when VIX > 30 |
@@ -154,12 +157,18 @@ The system is split into a **FastAPI server** (deployable to Cloud Run) and a **
 ### 🖥 Desktop Client
 | Feature | Description |
 |---------|-------------|
-| **5-Tab Interface** | Overview, AI Strategy, AI Chat, Journal, Full Logs |
+| **6-Tab Interface** | Overview, AI Strategy, AI Chat, Journal, Full Logs, Settings |
 | **Live Ticker Cards** | Symbol + price + change% + signal badge in sidebar |
 | **Multi-Timeframe Charts** | One-click timeframe switching with server-side candle data |
+| **Chart Search Bar** | Autocomplete ticker search above chart |
 | **Confidence Gauge** | Visual confidence indicator on strategy tab |
 | **AI Cost Badge** | Real-time daily AI spend displayed in top bar |
 | **Rest Mode Indicator** | Visual warning when bot is in fatigue rest mode |
+| **Universe Panel** | Horizontal scrollable buttons with delta updates + click-to-chart |
+| **Settings Tab** | Full runtime configuration with hybrid API key management |
+| **Tag-Based Tickers** | Visual tag blocks with live validation for fixed ticker input |
+| **Input Validation** | Number-only fields, K/M/B/T auto-formatting, read-only dropdowns |
+| **Focus Highlighting** | Active field labels brighten for visual feedback |
 
 ---
 
@@ -171,17 +180,18 @@ Project-Scolecite/
 │   ├── main.py                  # FastAPI entry point
 │   ├── database.py              # SQLAlchemy async (SQLite / PostgreSQL)
 │   ├── routers/
-│   │   └── api.py               # REST + SSE endpoints (20+ routes)
+│   │   └── api.py               # REST + SSE endpoints (25+ routes)
 │   ├── core/
 │   │   ├── orchestrator.py      # 4-loop AI controller
 │   │   ├── mcp_server.py        # MCP tools & resources for Opus
-│   │   ├── trading_engine.py    # Alpaca broker + multi-timeframe candles
+│   │   ├── trading_engine.py    # Alpaca broker + multi-timeframe candles + caching
 │   │   ├── risk_manager.py      # Pre-trade checks + market fatigue
-│   │   └── ai_clients.py       # GrokFast + GrokStrategy + Opus CEO
+│   │   ├── ai_clients.py        # GrokFast + GrokStrategy + Opus CEO (streaming)
+│   │   └── ws_streamer.py       # Real-time Alpaca WebSocket price streaming
 │   └── utils/
-│       └── logging.py           # Sanitized structured JSON logging
+│       └── logging.py           # Sanitized structured JSON logging + thought broadcast
 ├── client/
-│   └── main.py                  # customtkinter UI — 5-tab terminal
+│   └── main.py                  # customtkinter UI — 6-tab terminal
 ├── shared/
 │   ├── config.py                # Pydantic Settings (50+ config fields)
 │   └── schemas.py               # Pydantic models (shared DTOs)
@@ -419,8 +429,14 @@ Opus CEO calls MCP tools **proactively** during strategy planning:
 | `GET` | `/api/universe` | Current dynamic ticker universe |
 | `POST` | `/api/universe` | Update ticker universe |
 | `GET` | `/api/cost` | AI cost summary |
+| `GET` | `/api/tickers/search` | Autocomplete ticker search |
 | `GET` | `/api/ticker-cards` | Live ticker card data |
 | `GET` | `/api/journal` | Auto-generated trade journal entries |
+| `GET` | `/api/settings` | Current runtime settings |
+| `PATCH` | `/api/settings` | Update settings (partial patch) |
+| `POST` | `/api/settings/reset` | Reset settings to defaults |
+| `GET` | `/api/settings/keys/status` | API key configuration status |
+| `POST` | `/api/settings/keys` | Submit API keys to server |
 
 ### MCP
 
@@ -439,11 +455,12 @@ The customtkinter desktop client features a **dark navy professional theme** wit
 
 | Tab | Contents |
 |-----|----------|
-| **Overview** | Real-time multi-timeframe chart (1m–1mo selector), AI data feed |
+| **Overview** | Real-time multi-timeframe chart (1m–1y selector), AI data feed with streaming reasoning |
 | **AI Strategy** | Opus strategy display, confidence gauge, hypothesis accept/reject stats, self-correction log |
 | **AI Chat** | Direct conversation with Opus CEO — ask about strategy, positions, market conditions |
 | **Journal** | Daily AI-generated trade journals with wins, losses, P&L, lessons learned |
 | **Full Logs** | System log stream with syntax-highlighted levels (info/warn/error/strategy) |
+| **Settings** | Full runtime config: risk, AI models, tickers, chart, timezone, API keys |
 
 ### Sidebar
 
@@ -451,7 +468,7 @@ The customtkinter desktop client features a **dark navy professional theme** wit
 - **Bot Controls** — Start / Stop / Emergency Kill Switch
 - **Portfolio** — Equity, cash, daily P&L, total P&L, positions count
 - **Ticker Cards** — Live symbol cards with price, change%, signal badge (clickable for chart)
-- **Universe** — Current tracked symbols
+- **Universe** — Horizontal scrollable ticker buttons with delta updates
 
 ### Top Bar
 
@@ -493,9 +510,9 @@ gcloud run deploy scolecite-bot \
 
 | Layer | Technology |
 |-------|-----------|
-| **Server** | FastAPI · SQLAlchemy (async) · SSE-Starlette · Pydantic v2 |
+| **Server** | FastAPI · SQLAlchemy (async) · SSE-Starlette · Pydantic v2 · WebSockets |
 | **Client** | customtkinter · matplotlib · httpx |
-| **AI** | Claude Opus 4 (CEO) · Grok 3 (Strategy) · Grok 3 Fast (Data) |
+| **AI** | Claude Opus 4 (CEO, streaming) · Grok 3 (Strategy, streaming) · Grok 3 Fast (Data, streaming) |
 | **Broker** | Alpaca Markets (paper + live) |
 | **Database** | SQLite (dev) / PostgreSQL (prod) · aiosqlite · asyncpg |
 | **Analysis** | pandas · numpy · ta (technical analysis) |
