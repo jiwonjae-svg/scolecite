@@ -1,0 +1,4 @@
+project_id  = "your-gcp-project-id"
+region      = "asia-northeast3"
+service_name = "scolecite-bot"
+# db_password → set via: terraform apply -var="db_password=YOUR_PASSWORD"

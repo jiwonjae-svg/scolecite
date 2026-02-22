@@ -125,7 +125,7 @@ class AlpacaWSStreamer:
 
     async def _connect_and_listen(self) -> None:
         """Connect, authenticate, subscribe, and process messages."""
-        async with websockets.connect(self._url) as ws:
+        async with websockets.connect(self._url) as ws:  # type: ignore[attr-defined]
             self._ws = ws
             self._reconnect_delay = 1.0  # reset on successful connect
 

@@ -95,11 +95,30 @@ app.include_router(router)
 
 
 # ---------------------------------------------------------------------------
-# Health check (Cloud Run requires this)
+# Health / Readiness / Startup Probes (Cloud Run)
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
+    """Liveness probe — lightweight, no DB call."""
     return {"status": "ok", "mode": settings.TRADING_MODE}
+
+
+@app.get("/ready")
+async def readiness():
+    """Readiness probe — verifies DB connection is alive."""
+    from server.database import async_session_factory
+    from sqlalchemy import text
+
+    try:
+        async with async_session_factory() as session:
+            await session.execute(text("SELECT 1"))
+        return {"status": "ready", "db": "connected"}
+    except Exception as exc:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "db": str(exc)},
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,64 @@
+# =============================================================================
+# Project Scolecite — .dockerignore
+# Keep Docker build context small and secure
+# =============================================================================
+
+# Git
+.git/
+.gitignore
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Client (not needed on server)
+client/
+start_client.bat
+
+# Database files
+*.db
+*.sqlite3
+*.db-journal
+backups/
+
+# Secrets
+.env
+.env.local
+.env.production
+
+# Logs & runtime
+*.log
+settings_history.log
+repomix-output.xml
+
+# Tests
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Terraform
+deploy/terraform/.terraform/
+deploy/terraform/*.tfstate*
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Docs
+LICENSE
+README.md
+*.md
+
+# OS
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc

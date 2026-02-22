@@ -5,12 +5,16 @@
 # =============================================================================
 """
 Async SQLAlchemy database engine, session factory, ORM models, and backup.
-Supports SQLite (dev) and PostgreSQL (Cloud Run) via DATABASE_URL env var.
+Supports SQLite (dev) and PostgreSQL (Cloud Run via Cloud SQL unix socket).
+DATABASE_URL examples:
+  - SQLite:      sqlite+aiosqlite:///./scolecite.db
+  - PostgreSQL:  postgresql+asyncpg://user:pass@/dbname?host=/cloudsql/PROJECT:REGION:INSTANCE
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -35,21 +39,33 @@ from sqlalchemy.orm import DeclarativeBase
 
 from shared.config import get_settings
 
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Engine & Session
 # ---------------------------------------------------------------------------
 _settings = get_settings()
+_is_sqlite = "sqlite" in _settings.DATABASE_URL
+
+# Connection pool tuning (PostgreSQL production defaults)
+_pool_kwargs: dict = {}
+if not _is_sqlite:
+    _pool_kwargs = {
+        "pool_size": 5,
+        "max_overflow": 10,
+        "pool_timeout": 30,
+        "pool_recycle": 1800,      # recycle connections every 30 min
+        "pool_pre_ping": True,     # verify connections before use
+    }
 
 engine = create_async_engine(
     _settings.DATABASE_URL,
     echo=False,
     future=True,
-    # SQLite needs check_same_thread=False for async
     connect_args=(
-        {"check_same_thread": False}
-        if "sqlite" in _settings.DATABASE_URL
-        else {}
+        {"check_same_thread": False} if _is_sqlite else {}
     ),
+    **_pool_kwargs,
 )
 
 async_session_factory = async_sessionmaker(
@@ -108,7 +124,8 @@ class ThoughtRecord(Base):
         self.data_json = json.dumps(data, default=str)
 
     def get_data(self) -> dict:
-        return json.loads(self.data_json) if self.data_json else {}
+        raw = self.data_json
+        return json.loads(str(raw)) if raw is not None else {}
 
 
 class ReviewRecord(Base):
@@ -188,7 +205,8 @@ class JournalRecord(Base):
         self.key_lessons_json = json.dumps(lessons)
 
     def get_lessons(self) -> list[str]:
-        return json.loads(self.key_lessons_json) if self.key_lessons_json else []
+        raw = self.key_lessons_json
+        return json.loads(str(raw)) if raw is not None else []
 
 
 class CandidateRecord(Base):
@@ -227,16 +245,35 @@ class BacktestRecord(Base):
         self.result_json = json.dumps(result, default=str)
 
     def get_result(self) -> dict:
-        return json.loads(self.result_json) if self.result_json else {}
+        raw = self.result_json
+        return json.loads(str(raw)) if raw is not None else {}
 
 
 # ---------------------------------------------------------------------------
 # Table Creation Helper
 # ---------------------------------------------------------------------------
 async def init_db() -> None:
-    """Create all tables. Safe to call multiple times."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    """Create all tables. Safe to call multiple times.
+    Retries on Cloud SQL cold-start connection delays.
+    """
+    import asyncio
+
+    max_retries = 5 if not _is_sqlite else 1
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            db_type = "PostgreSQL (Cloud SQL)" if not _is_sqlite else "SQLite"
+            logger.info("Database ready — %s", db_type)
+            return
+        except Exception as exc:
+            if attempt == max_retries:
+                logger.error("Failed to init DB after %d attempts: %s", max_retries, exc)
+                raise
+            wait = 2 ** attempt
+            logger.warning("DB init attempt %d/%d failed, retrying in %ds: %s",
+                           attempt, max_retries, wait, exc)
+            await asyncio.sleep(wait)
 
 
 # ---------------------------------------------------------------------------
@@ -245,9 +282,10 @@ async def init_db() -> None:
 def backup_sqlite_db() -> str | None:
     """
     Create a timestamped copy of the SQLite database file.
-    Returns the backup path, or None if not applicable.
+    Returns the backup path, or None if not applicable (e.g. PostgreSQL).
+    For Cloud SQL (PostgreSQL), use Cloud SQL automated backups instead.
     """
-    if "sqlite" not in _settings.DATABASE_URL:
+    if not _is_sqlite:
         return None
 
     # Extract the file path from the URL
