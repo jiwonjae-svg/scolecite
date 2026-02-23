@@ -1,16 +1,81 @@
 # =============================================================================
-# Project Scolecite - Docker Compose (local development)
+# Project Scolecite - Docker Compose (Oracle Cloud VPS Production)
+# =============================================================================
+# Target: Oracle Cloud Always Free Ampere A1 (4 OCPU, 24GB RAM, 200GB Block)
+# Stack: PostgreSQL 16 + FastAPI server + Nginx reverse proxy
+# Usage: docker compose up -d --build
 # =============================================================================
 
-version: "3.9"
-
 services:
-  server:
-    build: .
+  # ---------- PostgreSQL Database ----------
+  db:
+    image: postgres:16-alpine
+    container_name: scolecite-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-scolecite}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-scolecite}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
     ports:
-      - "8000:8000"
+      - "127.0.0.1:5432:5432"   # Only accessible from localhost
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-scolecite}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.0"
+
+  # ---------- Scolecite Trading Server ----------
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: scolecite-server
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
     env_file:
       - .env
+    environment:
+      # Override DATABASE_URL to point to the containerized PostgreSQL
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-scolecite}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-scolecite}
+      PORT: "8000"
+      GUNICORN_WORKERS: "4"
     volumes:
-      - ./scolecite.db:/app/scolecite.db
-    restart: unless-stopped
+      - app_backups:/app/backups
+      - app_data:/app/data
+      - ./settings.json:/app/settings.json:rw
+    ports:
+      - "127.0.0.1:8000:8000"   # Only accessible from localhost (Nginx proxies)
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: "2.0"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  pgdata:
+    driver: local
+  app_backups:
+    driver: local
+  app_data:
+    driver: local

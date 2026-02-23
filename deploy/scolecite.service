@@ -1,0 +1,57 @@
+# =============================================================================
+# Project Scolecite - systemd Service Unit
+# =============================================================================
+# Install:
+#   sudo cp deploy/scolecite.service /etc/systemd/system/scolecite.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable scolecite
+#   sudo systemctl start scolecite
+#
+# Logs:
+#   journalctl -u scolecite -f
+#   journalctl -u scolecite --since "1 hour ago"
+# =============================================================================
+
+[Unit]
+Description=Project Scolecite - AI Trading Bot (Docker Compose)
+Documentation=https://github.com/jiwonjae-svg/scolecite
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=ubuntu
+Group=docker
+
+# Project directory
+WorkingDirectory=/opt/scolecite
+
+# Start: build and launch all containers
+ExecStart=/usr/bin/docker compose up -d --build --remove-orphans
+
+# Stop: gracefully shut down all containers
+ExecStop=/usr/bin/docker compose down
+
+# Reload: rebuild and restart without downtime
+ExecReload=/usr/bin/docker compose up -d --build --remove-orphans
+
+# Restart policy
+Restart=on-failure
+RestartSec=30
+
+# Timeout for container builds
+TimeoutStartSec=300
+TimeoutStopSec=120
+
+# Environment file (optional, for COMPOSE_PROJECT_NAME etc.)
+# EnvironmentFile=/opt/scolecite/.env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=scolecite
+
+[Install]
+WantedBy=multi-user.target
