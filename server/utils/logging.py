@@ -4,7 +4,7 @@
 # The authors are NOT responsible for any financial losses.
 # =============================================================================
 """
-Structured JSON logging to stdout (Cloud Run compliant).
+Structured JSON logging to stdout (Docker/journalctl compatible).
 Every AI thought process is captured and forwarded to SSE subscribers.
 Includes log sanitization to prevent leaking API keys & account numbers.
 """

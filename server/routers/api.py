@@ -505,7 +505,7 @@ async def sse_stream(request: Request):
     """
     Server-Sent Events endpoint.
     Pushes real-time market data, insights, strategy updates, trades, logs.
-    Cloud Run compatible (HTTP/SSE, no WebSocket).
+    HTTP/SSE streaming (no WebSocket; compatible with Nginx proxy).
     """
     orch = _get_orchestrator(request)
     queue = orch.subscribe_sse()

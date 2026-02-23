@@ -5,7 +5,7 @@
 # =============================================================================
 """
 Centralized configuration loaded from environment variables.
-Supports local development (.env file) and Cloud Run (injected env vars).
+Supports local development (.env file) and production (env vars from .env or systemd).
 """
 
 from __future__ import annotations
@@ -118,7 +118,7 @@ class Settings(BaseSettings):
     # ---- Database ----
     DATABASE_URL: str = Field(
         default="sqlite+aiosqlite:///./scolecite.db",
-        description="Async DB URL. Use postgresql+asyncpg://... for Cloud Run.",
+        description="Async DB URL. Use postgresql+asyncpg://... for production (docker-compose).",
     )
 
     # ---- Volatility Thresholds ----

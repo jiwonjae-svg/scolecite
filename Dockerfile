@@ -1,12 +1,13 @@
 # =============================================================================
-# Project Scolecite - Dockerfile (Cloud Run / Local)
+# Project Scolecite - Dockerfile (Oracle Cloud VPS)
 # DISCLAIMER: For educational/research purposes only.
 # =============================================================================
-# Optimised for Google Cloud Run:
+# Optimised for Oracle Cloud Always Free Ampere A1 (ARM64):
 #   - Multi-stage build for smaller image
 #   - Non-root user for security
 #   - Gunicorn + Uvicorn workers for production concurrency
-#   - Cloud SQL Auth Proxy unix-socket ready
+#   - PostgreSQL-ready (asyncpg)
+#   - Works on both ARM64 (OCI A1) and AMD64 (local dev)
 # =============================================================================
 
 # ---------- Stage 1: builder ----------
@@ -26,7 +27,7 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 # ---------- Stage 2: runtime ----------
 FROM python:3.12-slim
 
-# Prevent Python from buffering stdout/stderr (Cloud Run logging)
+# Prevent Python from buffering stdout/stderr (important for journalctl logging)
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
@@ -46,27 +47,28 @@ COPY --from=builder /install /usr/local
 # Copy application code
 COPY shared/ ./shared/
 COPY server/ ./server/
-COPY settings.json* ./
+# settings.json: use example if missing (runtime mount overrides; app creates defaults)
+COPY settings.json.example ./settings.json
 
-# Create dirs for Cloud SQL socket & backups
-RUN mkdir -p /cloudsql /app/backups && chown -R scolecite:scolecite /app /cloudsql
+# Create dirs for backups & data
+RUN mkdir -p /app/backups /app/data && chown -R scolecite:scolecite /app
 
 USER scolecite
 
-# Cloud Run uses PORT env var (default 8000)
+# Default port
 ENV PORT=8000
 EXPOSE ${PORT}
 
-# Health check (used by Cloud Run startup/liveness probes)
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+# Health check for docker-compose and monitoring
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
 # Production entry: gunicorn w/ uvicorn workers
-# Cloud Run concurrency=80 → 2 workers × 40 connections each
+# Oracle A1 has 4 OCPUs → 4 workers for optimal concurrency
 CMD ["sh", "-c", "gunicorn server.main:app \
     --bind 0.0.0.0:${PORT} \
     --worker-class uvicorn.workers.UvicornWorker \
-    --workers 2 \
+    --workers ${GUNICORN_WORKERS:-4} \
     --timeout 120 \
     --graceful-timeout 30 \
     --keep-alive 65 \

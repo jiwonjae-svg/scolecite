@@ -34,7 +34,7 @@
 - [MCP Tools](#-mcp-tools)
 - [API Reference](#-api-reference)
 - [Desktop Client](#-desktop-client)
-- [Cloud Run Deployment](#-cloud-run-deployment)
+- [Oracle Cloud VPS Deployment](#-oracle-cloud-vps-production-deployment)
 - [Tech Stack](#-tech-stack)
 - [License](#-license)
 
@@ -51,7 +51,7 @@ Project Scolecite is a full-stack Python autonomous trading system powered by a 
 | 👔 **Decide** | Opus CEO (`claude-opus-4`) | Review hypotheses, approve/reject, execute via MCP tools |
 | 🔄 **Correct** | Opus CEO | Review past trades, write self-correction improvements |
 
-The system is split into a **FastAPI server** (deployable to Cloud Run) and a **customtkinter desktop client** connected via REST + SSE.
+The system is split into a **FastAPI server** (deployable to Oracle Cloud VPS) and a **customtkinter desktop client** connected via REST + SSE.
 
 ---
 
@@ -480,314 +480,110 @@ The customtkinter desktop client features a **dark navy professional theme** wit
 
 ---
 
-## ☁ Cloud Run Production Deployment
+## Oracle Cloud VPS Production Deployment
 
-> **Cloud Run 프로덕션 배포 가이드** — 전체 인프라 자동화 스크립트 포함
+Production deployment on **Oracle Cloud Always Free Ampere A1 Compute** (4 OCPU, 24 GB RAM, 200 GB Block Volume). Zero infrastructure cost.
 
-### Prerequisites / 사전 준비
+### Target Stack
 
-| Tool | Version | Install |
-|------|---------|---------|
-| `gcloud` CLI | latest | [Install](https://cloud.google.com/sdk/docs/install) |
-| Docker | 20+ | [Install](https://docs.docker.com/get-docker/) |
-| Terraform (선택) | 1.5+ | [Install](https://developer.hashicorp.com/terraform/install) |
+| Component | Technology |
+|-----------|------------|
+| **Compute** | Oracle Cloud VM.Standard.A1.Flex (ARM64) |
+| **OS** | Ubuntu 24.04 LTS |
+| **Database** | PostgreSQL 16 (Docker container) |
+| **Reverse Proxy** | Nginx + Let's Encrypt SSL |
+| **Secrets** | `.env` file (no Secret Manager) |
+| **Logging** | stdout → journalctl |
+| **Auto-start** | systemd (`scolecite.service`) |
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Oracle Cloud Always Free A1 Instance                │
+│              Ubuntu 24.04 LTS (ARM64)                            │
+│              4 OCPU · 24 GB RAM · 200 GB Disk                    │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │  UFW (22, 80, 443) · Fail2Ban · unattended-upgrades        │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                                                                  │
+│  ┌──────────────┐                                                │
+│  │    Nginx     │  :80 → :443 redirect · Let's Encrypt           │
+│  │  (host)      │  :443 → proxy_pass http://127.0.0.1:8000       │
+│  └──────┬───────┘                                                │
+│         │                                                        │
+│  ┌──────▼─────────────────────────────────────────────────────┐  │
+│  │  Docker Compose                                             │  │
+│  │  ┌────────────────────┐   ┌──────────────────────────────┐  │  │
+│  │  │ scolecite-server   │   │ scolecite-db                 │  │  │
+│  │  │ FastAPI + Gunicorn │──▶│ PostgreSQL 16                │  │  │
+│  │  │ 4 workers :8000    │   │ :5432 (internal)             │  │  │
+│  │  └────────────────────┘   └──────────────────────────────┘  │  │
+│  └─────────────────────────────────────────────────────────────┘  │
+│                                                                  │
+│  systemd: scolecite.service (boot auto-start)                     │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Quick Start
+
+1. **Provision** an Oracle Cloud Always Free A1 instance (Ubuntu 24.04).
+2. **SSH** into the server and follow [DEPLOYMENT.md](DEPLOYMENT.md) for step-by-step setup.
+3. **Deploy**:
+   ```bash
+   cd /opt/scolecite
+   cp .env.example .env   # Edit with API keys
+   docker compose up -d --build
+   ./deploy.sh            # Or: git pull + rebuild + restart
+   ```
+4. **First boot checklist**: See [DEPLOYMENT.md § First Boot Checklist](DEPLOYMENT.md#9-first-boot-checklist).
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `DEPLOYMENT.md` | Full deployment guide (Oracle Cloud, UFW, Fail2Ban, Nginx, SSL) |
+| `deploy/nginx/scolecite.conf` | Nginx reverse proxy config |
+| `deploy/scolecite.service` | systemd unit for docker-compose auto-start |
+| `deploy.sh` | Zero-downtime deploy (git pull → build → restart) |
+
+### Zero-Downtime Deploy
 
 ```bash
-# Authenticate / 인증
-gcloud auth login
-gcloud config set project YOUR_PROJECT_ID
+cd /opt/scolecite
+./deploy.sh              # Full: git pull + build + restart
+./deploy.sh --no-pull    # Rebuild from local code only
+./deploy.sh --status     # Show container status
+./deploy.sh --logs       # Tail logs
+./deploy.sh --backup-db  # Backup PostgreSQL before deploy
 ```
 
----
+### Health Checks
 
-### Architecture / 아키텍처
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│                    Google Cloud Platform                        │
-│                                                                │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────┐  │
-│  │  Cloud Run    │───▶│  Cloud SQL   │    │ Secret Manager   │  │
-│  │  scolecite-bot│    │  PostgreSQL  │    │ API Keys / DB URL│  │
-│  │  (gen2, 2 CPU)│    │  (db-f1-micro)│    │                  │  │
-│  │  min=0 max=3  │    │              │    │                  │  │
-│  └───────┬───────┘    └──────────────┘    └──────────────────┘  │
-│          │                    ▲                      ▲          │
-│          │  unix socket       │   env injection      │          │
-│          └────────────────────┘──────────────────────┘          │
-│                                                                │
-│  ┌──────────────┐    ┌──────────────┐                          │
-│  │ VPC Connector │    │ Artifact     │                          │
-│  │ 10.8.0.0/28  │    │ Registry     │                          │
-│  └──────────────┘    └──────────────┘                          │
-└────────────────────────────────────────────────────────────────┘
-          ▲
-          │ HTTPS (SSE streaming)
-          │
-┌─────────┴─────────┐
-│  Desktop Client    │
-│  customtkinter     │
-└───────────────────┘
-```
-
----
-
-### Option A: One-Click Deploy Script / 원클릭 배포
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /health` | Liveness (no DB) |
+| `GET /ready` | Readiness (DB connected) |
 
 ```bash
-# 모든 인프라 + 배포를 한번에 실행
-export GCP_PROJECT_ID=your-project-id
-bash deploy/deploy.sh
+curl http://localhost:8000/health   # → {"status":"ok","mode":"paper"}
+curl http://localhost:8000/ready    # → {"status":"ready","db":"connected"}
 ```
 
-The script automatically: / 스크립트가 자동으로:
-1. Enables required GCP APIs / 필요한 API 활성화
-2. Creates Artifact Registry / 컨테이너 레지스트리 생성
-3. Creates Cloud SQL (PostgreSQL 15) / DB 인스턴스 생성
-4. Sets up Secret Manager / 시크릿 매니저 설정
-5. Creates VPC Connector / VPC 커넥터 생성
-6. Builds & pushes Docker image / 이미지 빌드·푸시
-7. Deploys to Cloud Run / Cloud Run 배포
+### Environment Variables
 
----
+API keys and config live in `.env` (never committed). Required:
 
-### Option B: Cloud Build CI/CD / CI/CD 파이프라인
+- `ANTHROPIC_API_KEY`, `XAI_GROK_API_KEY`
+- `APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`
+- `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` (for docker-compose)
 
-```bash
-# Submit a build manually / 수동 빌드 제출
-gcloud builds submit . \
-  --config=cloudbuild.yaml \
-  --substitutions=_CLOUD_SQL_CONN=PROJECT:asia-northeast3:scolecite-db
+`DATABASE_URL` is auto-set by docker-compose to point at the PostgreSQL container.
 
-# Or set up a trigger on push to main / main 푸시 트리거 설정
-gcloud builds triggers create github \
-  --name=scolecite-deploy \
-  --repo-name=scolecite \
-  --repo-owner=YOUR_GITHUB_USER \
-  --branch-pattern='^main$' \
-  --build-config=cloudbuild.yaml \
-  --substitutions=_CLOUD_SQL_CONN=PROJECT:asia-northeast3:scolecite-db
-```
+### Cost
 
----
-
-### Option C: Terraform / 테라폼 (IaC)
-
-```bash
-cd deploy/terraform
-cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars with your project ID
-
-terraform init
-terraform plan -var="db_password=$(openssl rand -base64 24)"
-terraform apply -var="db_password=$(openssl rand -base64 24)"
-```
-
----
-
-### Cloud SQL Setup / Cloud SQL 설정
-
-| Setting | Value | 설명 |
-|---------|-------|------|
-| Engine | PostgreSQL 15 | 최신 안정 버전 |
-| Tier | `db-f1-micro` | 개발/소규모 ($7.67/mo) |
-| Region | `asia-northeast3` (Seoul) | 한국 리전 |
-| Storage | 10GB auto-increase | 자동 증설 |
-| Backup | Daily 04:00 UTC | 자동 백업 |
-
-**Connection method / 연결 방식:**
-- Cloud Run → Cloud SQL: **Unix socket** via `/cloudsql/PROJECT:REGION:INSTANCE`
-- No Cloud SQL Auth Proxy needed in Cloud Run (built-in)
-- `DATABASE_URL` format:
-  ```
-  postgresql+asyncpg://scolecite:PASSWORD@/scolecite?host=/cloudsql/PROJECT:REGION:scolecite-db
-  ```
-
----
-
-### Secret Manager / 시크릿 관리
-
-All API keys are stored in **Secret Manager** (never in env vars or `.env`):
-
-| Secret Name | Description | 설명 |
-|-------------|-------------|------|
-| `ANTHROPIC_API_KEY` | Claude API key | Anthropic API 키 |
-| `XAI_GROK_API_KEY` | Grok API key | xAI Grok API 키 |
-| `POLYGON_API_KEY` | Market data API key | 시세 데이터 API 키 |
-| `APCA_API_KEY_ID` | Alpaca key ID | 브로커 API Key |
-| `APCA_API_SECRET_KEY` | Alpaca secret key | 브로커 Secret Key |
-| `DATABASE_URL` | PostgreSQL connection string | DB 접속 문자열 |
-
-```bash
-# Set a secret value / 시크릿 값 설정
-echo -n 'sk-ant-...' | gcloud secrets versions add ANTHROPIC_API_KEY --data-file=-
-
-# Verify / 확인
-gcloud secrets versions access latest --secret=ANTHROPIC_API_KEY
-```
-
-Cloud Run automatically injects these as environment variables → `pydantic-settings` reads them natively.
-Cloud Run이 환경변수로 자동 주입 → `pydantic-settings`가 자동 인식합니다.
-
----
-
-### Service Configuration / 서비스 설정
-
-| Parameter | Value | 설명 |
-|-----------|-------|------|
-| `region` | `asia-northeast3` | 서울 리전 (한국 최저 지연) |
-| `min-instances` | `0` | 비용 절약 (cold start 허용) |
-| `max-instances` | `3` | 최대 인스턴스 수 제한 |
-| `concurrency` | `80` | 인스턴스당 동시 요청 수 |
-| `cpu` | `2` | AI 처리용 2 vCPU |
-| `memory` | `2Gi` | 모델 응답 처리 + pandas |
-| `timeout` | `300s` | AI 응답 대기 (최대 5분) |
-| `execution-environment` | `gen2` | Cloud Run gen2 (gVisor) |
-| `startup-cpu-boost` | `true` | Cold start 시 CPU 부스트 |
-| `vpc-egress` | `all-traffic` | VPC 경유 외부 트래픽 |
-
----
-
-### Health Checks & Probes / 헬스체크
-
-| Probe | Endpoint | Purpose | 설명 |
-|-------|----------|---------|------|
-| **Startup** | `GET /health` | Container ready? | 컨테이너 시작 확인 |
-| **Liveness** | `GET /health` | Still alive? | 프로세스 생존 확인 |
-| **Readiness** | `GET /ready` | DB connected? | DB 연결 상태 확인 |
-
-```bash
-# Test health / 헬스체크 테스트
-curl https://YOUR_SERVICE_URL/health
-# → {"status": "ok", "mode": "paper"}
-
-curl https://YOUR_SERVICE_URL/ready
-# → {"status": "ready", "db": "connected"}
-```
-
----
-
-### Environment Variable Management / 환경변수 관리
-
-```
-┌─────────────────────────────────────────────────────────┐
-│              Environment Variable Sources                │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│  1. Secret Manager (API keys, DATABASE_URL)             │
-│     → Cloud Run injects as env vars at startup          │
-│     → 시크릿 매니저에서 시작 시 자동 주입               │
-│                                                         │
-│  2. Cloud Run env vars (TRADING_MODE, etc.)             │
-│     → Set in deploy command or cloudbuild.yaml          │
-│     → 배포 명령어나 cloudbuild.yaml에서 설정            │
-│                                                         │
-│  3. settings.json (runtime-tunable parameters)          │
-│     → Modified via Settings tab → PUT /api/settings     │
-│     → Settings 탭에서 실시간 변경 가능                  │
-│     → Persisted in container filesystem (ephemeral)     │
-│     → 컨테이너 재시작 시 초기화됨 (필요시 GCS 연동)     │
-│                                                         │
-│  Priority: Secret Manager > env vars > settings.json    │
-│           > .env (local dev only)                       │
-└─────────────────────────────────────────────────────────┘
-```
-
----
-
-### Cost Optimization / 비용 최적화
-
-| Strategy | Impact | 설명 |
-|----------|--------|------|
-| `min-instances=0` | 💰💰💰 | 미사용 시 과금 없음 (Cold start ~2-3s) |
-| `startup-cpu-boost` | ⚡ | Cold start 시 CPU 부스트로 시작 시간 단축 |
-| `ENABLE_PROMPT_CACHING=true` | 💰💰 | Anthropic 프롬프트 캐싱 (최대 90% 비용 절감) |
-| `db-f1-micro` tier | 💰💰 | 최소 DB 티어 (~$7.67/mo) |
-| `e2-micro` VPC connector | 💰 | 최소 VPC 티어 |
-| Gen2 execution environment | ⚡ | 더 빠른 cold start |
-| Multi-stage Docker build | ⚡ | 작은 이미지 → 빠른 배포 |
-| `pool_pre_ping=True` | 🛡️ | DB 연결 재활용, 끊김 방지 |
-| Gunicorn 2 workers | ⚡ | 효율적인 동시성 처리 |
-| Artifact Registry (not GCR) | 💰 | 최신 권장, 비용 효율적 |
-
-**Estimated monthly cost (idle) / 예상 월 비용 (대기 시):**
-- Cloud SQL db-f1-micro: ~$7.67
-- VPC Connector (2× e2-micro): ~$14
-- Cloud Run (min=0): $0 when idle
-- **Total idle: ~$22/mo**
-
-**Estimated monthly cost (active trading) / 예상 월 비용 (활성 트레이딩):**
-- Cloud Run: ~$5-15 (depending on usage)
-- AI API costs: varies (tracked in-app via `/api/cost`)
-- **Total active: ~$40-55/mo** (excluding AI API)
-
----
-
-### Post-Deployment Checklist / 배포 후 체크리스트
-
-```
- 1. ✅ Health check 확인
-    curl https://SERVICE_URL/health
-
- 2. ✅ Readiness check 확인 (DB 연결)
-    curl https://SERVICE_URL/ready
-
- 3. ✅ API status 확인
-    curl https://SERVICE_URL/api/status
-
- 4. ✅ Secret Manager에 모든 API 키 설정
-    gcloud secrets versions list ANTHROPIC_API_KEY
-    gcloud secrets versions list XAI_GROK_API_KEY
-    gcloud secrets versions list APCA_API_KEY_ID
-
- 5. ✅ Desktop client 연결 테스트
-    → Settings에서 Server URL을 Cloud Run URL로 변경
-
- 6. ✅ SSE 스트리밍 테스트
-    curl -N https://SERVICE_URL/api/stream
-
- 7. ✅ Cloud Run 로그 확인
-    gcloud run services logs read scolecite-bot --region=asia-northeast3
-
- 8. ✅ Paper 모드로 봇 시작
-    curl -X POST https://SERVICE_URL/api/bot/start
-
- 9. ✅ AI 비용 모니터링
-    curl https://SERVICE_URL/api/cost
-
-10. ✅ Cloud SQL 백업 확인
-    gcloud sql backups list --instance=scolecite-db
-```
-
----
-
-### Useful Commands / 유용한 명령어
-
-```bash
-# View logs / 로그 보기
-gcloud run services logs read scolecite-bot --region=asia-northeast3 --limit=100
-
-# Update env var / 환경변수 수정
-gcloud run services update scolecite-bot \
-  --region=asia-northeast3 \
-  --update-env-vars="TRADING_MODE=live"
-
-# Scale to 0 (cost save) / 비용 절약 스케일다운
-gcloud run services update scolecite-bot \
-  --region=asia-northeast3 \
-  --min-instances=0
-
-# Force new revision / 강제 새 리비전
-gcloud run deploy scolecite-bot \
-  --region=asia-northeast3 \
-  --image=asia-northeast3-docker.pkg.dev/PROJECT/scolecite/scolecite-bot:latest
-
-# Connect to Cloud SQL (debug) / 디버그용 DB 접속
-gcloud sql connect scolecite-db --user=scolecite --database=scolecite
-
-# Delete service (cleanup) / 서비스 삭제
-gcloud run services delete scolecite-bot --region=asia-northeast3
-```
+**$0/month** for infrastructure (Always Free tier). Only AI API usage (Anthropic, xAI) incurs cost, tracked in-app via `/api/cost`.
 
 ---
 
@@ -799,10 +595,10 @@ gcloud run services delete scolecite-bot --region=asia-northeast3
 | **Client** | customtkinter · matplotlib · httpx |
 | **AI** | Claude Opus 4 (CEO, streaming) · Grok 3 (Strategy, streaming) · Grok 3 Fast (Data, streaming) |
 | **Broker** | Alpaca Markets (paper + live) |
-| **Database** | SQLite (dev) / Cloud SQL PostgreSQL (prod) · aiosqlite · asyncpg |
+| **Database** | SQLite (dev) / PostgreSQL (prod, docker-compose) · aiosqlite · asyncpg |
 | **Analysis** | pandas · numpy · ta (technical analysis) |
 | **Resilience** | tenacity (retry) · structlog (sanitized logging) |
-| **Deployment** | Docker · Google Cloud Run (gen2) · Cloud Build · Terraform · Artifact Registry |
+| **Deployment** | Docker · docker-compose · Nginx · systemd · Oracle Cloud Always Free A1 |
 
 ---
 

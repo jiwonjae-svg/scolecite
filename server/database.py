@@ -5,10 +5,10 @@
 # =============================================================================
 """
 Async SQLAlchemy database engine, session factory, ORM models, and backup.
-Supports SQLite (dev) and PostgreSQL (Cloud Run via Cloud SQL unix socket).
+Supports SQLite (dev) and PostgreSQL (production on Oracle Cloud VPS).
 DATABASE_URL examples:
   - SQLite:      sqlite+aiosqlite:///./scolecite.db
-  - PostgreSQL:  postgresql+asyncpg://user:pass@/dbname?host=/cloudsql/PROJECT:REGION:INSTANCE
+  - PostgreSQL:  postgresql+asyncpg://user:pass@host:5432/dbname (e.g. db:5432 in docker-compose)
 """
 
 from __future__ import annotations
@@ -254,7 +254,7 @@ class BacktestRecord(Base):
 # ---------------------------------------------------------------------------
 async def init_db() -> None:
     """Create all tables. Safe to call multiple times.
-    Retries on Cloud SQL cold-start connection delays.
+    Retries on PostgreSQL connection delays (e.g. during container startup).
     """
     import asyncio
 
@@ -263,7 +263,7 @@ async def init_db() -> None:
         try:
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
-            db_type = "PostgreSQL (Cloud SQL)" if not _is_sqlite else "SQLite"
+            db_type = "PostgreSQL" if not _is_sqlite else "SQLite"
             logger.info("Database ready — %s", db_type)
             return
         except Exception as exc:
@@ -283,7 +283,7 @@ def backup_sqlite_db() -> str | None:
     """
     Create a timestamped copy of the SQLite database file.
     Returns the backup path, or None if not applicable (e.g. PostgreSQL).
-    For Cloud SQL (PostgreSQL), use Cloud SQL automated backups instead.
+    For PostgreSQL, use deploy.sh --backup-db or pg_dump instead.
     """
     if not _is_sqlite:
         return None

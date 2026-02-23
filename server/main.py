@@ -6,7 +6,7 @@
 """
 FastAPI server for the AI trading bot.
 Run locally: uvicorn server.main:app --host 0.0.0.0 --port 8000 --reload
-Cloud Run: see Dockerfile.
+Production (Oracle Cloud VPS): see Dockerfile and DEPLOYMENT.md.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ app.include_router(router)
 
 
 # ---------------------------------------------------------------------------
-# Health / Readiness / Startup Probes (Cloud Run)
+# Health / Readiness / Startup Probes (Docker, systemd, Nginx)
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
