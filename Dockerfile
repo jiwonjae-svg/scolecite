@@ -1,13 +1,11 @@
 # =============================================================================
-# Project Scolecite - Dockerfile (Oracle Cloud VPS)
+# Project Scolecite - Dockerfile (Railway / production)
 # DISCLAIMER: For educational/research purposes only.
 # =============================================================================
-# Optimised for Oracle Cloud Always Free Ampere A1 (ARM64):
+# Production: Railway (or any Docker host). PORT set by platform.
 #   - Multi-stage build for smaller image
 #   - Non-root user for security
-#   - Gunicorn + Uvicorn workers for production concurrency
-#   - PostgreSQL-ready (asyncpg)
-#   - Works on both ARM64 (OCI A1) and AMD64 (local dev)
+#   - Gunicorn + Uvicorn workers; PostgreSQL via DATABASE_URL
 # =============================================================================
 
 # ---------- Stage 1: builder ----------
@@ -63,8 +61,7 @@ EXPOSE ${PORT}
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
-# Production entry: gunicorn w/ uvicorn workers
-# Oracle A1 has 4 OCPUs → 4 workers for optimal concurrency
+# Production entry: gunicorn w/ uvicorn workers (PORT from Railway/env)
 CMD ["sh", "-c", "gunicorn server.main:app \
     --bind 0.0.0.0:${PORT} \
     --worker-class uvicorn.workers.UvicornWorker \

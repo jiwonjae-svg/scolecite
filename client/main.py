@@ -163,16 +163,24 @@ class SSEReader:
 # ===========================================================================
 # Reusable UI helpers
 # ===========================================================================
-def _card(parent: Any, **kw: Any) -> ctk.CTkFrame:
-    """Create a styled card frame."""
-    return ctk.CTkFrame(
-        parent,
+class _CardFrame(ctk.CTkFrame):
+    """Card frame with .inner content area so bottom border stays visible."""
+    inner: ctk.CTkFrame
+
+
+def _card(parent: Any, **kw: Any) -> _CardFrame:
+    """Create a styled card frame. Use card.inner for content so bottom border stays visible."""
+    outer = _CardFrame(parent, fg_color="transparent", **kw)
+    inner = ctk.CTkFrame(
+        outer,
         fg_color=BG_WIDGET,
         corner_radius=CORNER_R,
         border_width=1,
         border_color=BORDER_SUBTLE,
-        **kw,
     )
+    inner.pack(fill="both", expand=True, pady=(0, 4))
+    outer.inner = inner
+    return outer
 
 
 def _label(parent: Any, text: str, **kw: Any) -> ctk.CTkLabel:
@@ -316,7 +324,7 @@ class TradingBotApp(ctk.CTk):
             scrollbar_button_color=BG_PRIMARY,
             scrollbar_button_hover_color=BG_HOVER,
         )
-        scroll.pack(fill="both", expand=True, pady=(32, 0))
+        scroll.pack(fill="both", expand=True, pady=(32, PAD))
         self._sidebar_scroll = scroll
         scroll._scrollbar.grid_remove()  # hidden by default
         scroll.bind("<Configure>", lambda e: self._check_sidebar_scroll())
@@ -324,13 +332,13 @@ class TradingBotApp(ctk.CTk):
         # --- Connection status card ---
         conn_card = _card(scroll)
         conn_card.pack(fill="x", pady=(0, PAD))
-
-        _heading(conn_card, text="Connection Status").pack(
+        c = conn_card.inner
+        _heading(c, text="Connection Status").pack(
             anchor="w", padx=PAD, pady=(PAD, 8))
 
         self._status_indicators: dict[str, tuple[ctk.CTkLabel, ctk.CTkLabel]] = {}
         for name in ["Server", "Claude API", "Grok API", "Alpaca"]:
-            row = ctk.CTkFrame(conn_card, fg_color="transparent")
+            row = ctk.CTkFrame(c, fg_color="transparent")
             row.pack(fill="x", padx=PAD, pady=2)
             dot = _label(row, text="●", font=("Pretendard", 12),
                          text_color=TEXT_SECONDARY)
@@ -343,16 +351,16 @@ class TradingBotApp(ctk.CTk):
             key = name.lower().replace(" api", "").replace(" ", "_")
             self._status_indicators[key] = (dot, status_lbl)
 
-        ctk.CTkFrame(conn_card, fg_color="transparent", height=8).pack()
+        ctk.CTkFrame(c, fg_color="transparent", height=8).pack()
 
         # --- Bot Controls card ---
         ctrl_card = _card(scroll)
         ctrl_card.pack(fill="x", pady=(0, PAD))
-
-        _heading(ctrl_card, text="Bot Controls").pack(
+        c = ctrl_card.inner
+        _heading(c, text="Bot Controls").pack(
             anchor="w", padx=PAD, pady=(PAD, 10))
 
-        btn_row = ctk.CTkFrame(ctrl_card, fg_color="transparent")
+        btn_row = ctk.CTkFrame(c, fg_color="transparent")
         btn_row.pack(fill="x", padx=PAD)
         btn_row.grid_columnconfigure(0, weight=1)
         btn_row.grid_columnconfigure(1, weight=1)
@@ -374,7 +382,7 @@ class TradingBotApp(ctk.CTk):
         self._stop_btn.grid(row=0, column=1, padx=(4, 0), sticky="ew")
 
         self._kill_btn = ctk.CTkButton(
-            ctrl_card, text="⚠  EMERGENCY KILL SWITCH", height=42,
+            ctrl_card.inner, text="⚠  EMERGENCY KILL SWITCH", height=42,
             corner_radius=8, fg_color="#3b1219", hover_color="#5c1a27",
             text_color=ACCENT_RED, font=("Pretendard", 12, "bold"),
             command=self._on_emergency,
@@ -384,20 +392,20 @@ class TradingBotApp(ctk.CTk):
         # --- Portfolio card ---
         port_card = _card(scroll)
         port_card.pack(fill="x", pady=(0, PAD))
-
-        _heading(port_card, text="Portfolio").pack(
+        c = port_card.inner
+        _heading(c, text="Portfolio").pack(
             anchor="w", padx=PAD, pady=(PAD, 6))
 
         self._equity_label = _label(
-            port_card, text="$0.00", font=FONT_BIG_NUM, text_color=TEXT_HEADING)
+            c, text="$0.00", font=FONT_BIG_NUM, text_color=TEXT_HEADING)
         self._equity_label.pack(anchor="w", padx=PAD, pady=(0, 2))
 
         self._equity_sub = _label(
-            port_card, text="Total Equity", font=FONT_SMALL,
+            c, text="Total Equity", font=FONT_SMALL,
             text_color=TEXT_SECONDARY)
         self._equity_sub.pack(anchor="w", padx=PAD, pady=(0, 10))
 
-        metrics = ctk.CTkFrame(port_card, fg_color="transparent")
+        metrics = ctk.CTkFrame(c, fg_color="transparent")
         metrics.pack(fill="x", padx=PAD, pady=(0, PAD))
         metrics.grid_columnconfigure(0, weight=1)
         metrics.grid_columnconfigure(1, weight=1)
@@ -419,21 +427,23 @@ class TradingBotApp(ctk.CTk):
         # --- Ticker Cards ---
         ticker_card = _card(scroll)
         ticker_card.pack(fill="x", pady=(0, PAD))
-        _heading(ticker_card, text="Ticker Cards").pack(
+        c = ticker_card.inner
+        _heading(c, text="Ticker Cards").pack(
             anchor="w", padx=PAD, pady=(PAD, 6))
-        self._ticker_cards_frame = ctk.CTkFrame(ticker_card, fg_color="transparent")
+        self._ticker_cards_frame = ctk.CTkFrame(c, fg_color="transparent")
         self._ticker_cards_frame.pack(fill="x", padx=PAD, pady=(0, PAD))
         self._ticker_card_labels: dict[str, dict[str, ctk.CTkLabel]] = {}
 
         # --- Tracked Symbols card ---
         sym_card = _card(scroll)
         sym_card.pack(fill="x", pady=(0, PAD))
-        _heading(sym_card, text="Universe").pack(
+        c = sym_card.inner
+        _heading(c, text="Universe").pack(
             anchor="w", padx=PAD, pady=(PAD, 6))
 
-        # Horizontal scrollable frame for universe tickers
+        # Horizontal scrollable frame for universe tickers (height + gap for scrollbar)
         self._universe_canvas = tk.Canvas(
-            sym_card, height=32, bg=BG_WIDGET,
+            c, height=40, bg=BG_WIDGET,
             highlightthickness=0, bd=0)
         self._universe_canvas.pack(fill="x", padx=PAD, pady=(0, 4))
         self._universe_inner = ctk.CTkFrame(
@@ -450,13 +460,13 @@ class TradingBotApp(ctk.CTk):
             lambda e: self._universe_canvas.xview_scroll(
                 -1 * (e.delta // 120), "units"))
         self._universe_hscroll = ctk.CTkScrollbar(
-            sym_card, orientation="horizontal",
+            c, orientation="horizontal",
             command=self._universe_canvas.xview,
             height=8, fg_color=BG_WIDGET,
             button_color=BORDER_SUBTLE,
             button_hover_color=TEXT_SECONDARY,
         )
-        self._universe_hscroll.pack(fill="x", padx=PAD, pady=(0, PAD + 4))
+        self._universe_hscroll.pack(fill="x", padx=PAD, pady=(6, PAD + 4))
         self._universe_canvas.configure(xscrollcommand=self._universe_hscroll.set)
 
         self._universe_buttons: dict[str, ctk.CTkButton] = {}
@@ -518,12 +528,13 @@ class TradingBotApp(ctk.CTk):
         # Chart
         chart_card = _card(tab)
         chart_card.grid(row=0, column=0, sticky="nsew", padx=4, pady=(4, 4))
-        chart_card.grid_rowconfigure(1, weight=1)
-        chart_card.grid_columnconfigure(0, weight=1)
-
-        hdr = ctk.CTkFrame(chart_card, fg_color="transparent")
+        c = chart_card.inner
+        c.grid_rowconfigure(1, weight=1)
+        c.grid_columnconfigure(0, weight=1)
+        hdr = ctk.CTkFrame(c, fg_color="transparent")
         hdr.grid(row=0, column=0, sticky="ew", padx=PAD, pady=(PAD, 4))
         _heading(hdr, text="Real-time Market Data").pack(side="left")
+        chart_card_inner = c
 
         # Ticker search bar with autocomplete
         search_wrapper = ctk.CTkFrame(hdr, fg_color="transparent")
@@ -544,7 +555,7 @@ class TradingBotApp(ctk.CTk):
 
         # Dropdown listbox for search results (hidden by default)
         self._ticker_dropdown = ctk.CTkFrame(
-            chart_card, fg_color=BG_WIDGET, corner_radius=6,
+            chart_card_inner, fg_color=BG_WIDGET, corner_radius=6,
             border_width=1, border_color=BORDER_SUBTLE,
         )
         self._ticker_dropdown_buttons: list[ctk.CTkButton] = []
@@ -565,7 +576,7 @@ class TradingBotApp(ctk.CTk):
             btn.pack(side="left", padx=1)
             self._tf_buttons[tf] = btn
 
-        chart_container = ctk.CTkFrame(chart_card, fg_color=BG_PRIMARY,
+        chart_container = ctk.CTkFrame(chart_card_inner, fg_color=BG_PRIMARY,
                                        corner_radius=8)
         chart_container.grid(row=1, column=0, sticky="nsew",
                              padx=PAD, pady=(0, PAD))
@@ -582,14 +593,13 @@ class TradingBotApp(ctk.CTk):
         # Data Feed
         feed_card = _card(tab)
         feed_card.grid(row=1, column=0, sticky="nsew", padx=4, pady=(0, 4))
-        feed_card.grid_rowconfigure(1, weight=1)
-        feed_card.grid_columnconfigure(0, weight=1)
-
-        _heading(feed_card, text="AI Data Feed").grid(
+        c = feed_card.inner
+        c.grid_rowconfigure(1, weight=1)
+        c.grid_columnconfigure(0, weight=1)
+        _heading(c, text="AI Data Feed").grid(
             row=0, column=0, sticky="w", padx=PAD, pady=(PAD, 4))
-
         self._feed_text = ctk.CTkTextbox(
-            feed_card, font=FONT_MONO_SM, wrap="word",
+            c, font=FONT_MONO_SM, wrap="word",
             fg_color=BG_INPUT, text_color=TEXT_PRIMARY,
             corner_radius=8, border_width=0,
         )
@@ -619,10 +629,10 @@ class TradingBotApp(ctk.CTk):
         # Strategy panel
         strat_card = _card(tab)
         strat_card.grid(row=0, column=0, sticky="nsew", padx=4, pady=(4, 4))
-        strat_card.grid_rowconfigure(1, weight=1)
-        strat_card.grid_columnconfigure(0, weight=1)
-
-        hdr = ctk.CTkFrame(strat_card, fg_color="transparent")
+        c = strat_card.inner
+        c.grid_rowconfigure(1, weight=1)
+        c.grid_columnconfigure(0, weight=1)
+        hdr = ctk.CTkFrame(c, fg_color="transparent")
         hdr.grid(row=0, column=0, sticky="ew", padx=PAD, pady=(PAD, 4))
         _heading(hdr, text="Opus CEO — Strategy Engine").pack(side="left")
 
@@ -638,7 +648,7 @@ class TradingBotApp(ctk.CTk):
         self._strategy_badge.pack(side="right")
 
         self._strategy_text = ctk.CTkTextbox(
-            strat_card, font=FONT_MONO, wrap="word",
+            c, font=FONT_MONO, wrap="word",
             fg_color=BG_INPUT, text_color=TEXT_PRIMARY,
             corner_radius=8, border_width=0,
         )
@@ -661,14 +671,13 @@ class TradingBotApp(ctk.CTk):
         # Self-correction panel
         review_card = _card(tab)
         review_card.grid(row=1, column=0, sticky="nsew", padx=4, pady=(0, 4))
-        review_card.grid_rowconfigure(1, weight=1)
-        review_card.grid_columnconfigure(0, weight=1)
-
-        _heading(review_card, text="Self-Correction Log").grid(
+        c = review_card.inner
+        c.grid_rowconfigure(1, weight=1)
+        c.grid_columnconfigure(0, weight=1)
+        _heading(c, text="Self-Correction Log").grid(
             row=0, column=0, sticky="w", padx=PAD, pady=(PAD, 4))
-
         self._review_text = ctk.CTkTextbox(
-            review_card, font=FONT_MONO_SM, wrap="word",
+            c, font=FONT_MONO_SM, wrap="word",
             fg_color=BG_INPUT, text_color=TEXT_PRIMARY,
             corner_radius=8, border_width=0,
         )
@@ -689,17 +698,17 @@ class TradingBotApp(ctk.CTk):
 
         chat_card = _card(tab)
         chat_card.grid(row=0, column=0, sticky="nsew", padx=4, pady=(4, 4))
-        chat_card.grid_rowconfigure(1, weight=1)
-        chat_card.grid_columnconfigure(0, weight=1)
-
-        hdr = ctk.CTkFrame(chat_card, fg_color="transparent")
+        c = chat_card.inner
+        c.grid_rowconfigure(1, weight=1)
+        c.grid_columnconfigure(0, weight=1)
+        hdr = ctk.CTkFrame(c, fg_color="transparent")
         hdr.grid(row=0, column=0, sticky="ew", padx=PAD, pady=(PAD, 4))
         _heading(hdr, text="Chat with Opus CEO").pack(side="left")
         _label(hdr, text="Ask about strategy, positions, or market conditions",
                font=FONT_SMALL, text_color=TEXT_SECONDARY).pack(side="right")
 
         self._chat_display = ctk.CTkTextbox(
-            chat_card, font=FONT_MONO, wrap="word",
+            c, font=FONT_MONO, wrap="word",
             fg_color=BG_INPUT, text_color=TEXT_PRIMARY,
             corner_radius=8, border_width=0,
         )
@@ -744,10 +753,10 @@ class TradingBotApp(ctk.CTk):
 
         journal_card = _card(tab)
         journal_card.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
-        journal_card.grid_rowconfigure(1, weight=1)
-        journal_card.grid_columnconfigure(0, weight=1)
-
-        hdr = ctk.CTkFrame(journal_card, fg_color="transparent")
+        c = journal_card.inner
+        c.grid_rowconfigure(1, weight=1)
+        c.grid_columnconfigure(0, weight=1)
+        hdr = ctk.CTkFrame(c, fg_color="transparent")
         hdr.grid(row=0, column=0, sticky="ew", padx=PAD, pady=(PAD, 4))
         _heading(hdr, text="Trade Journal").pack(side="left")
 
@@ -760,7 +769,7 @@ class TradingBotApp(ctk.CTk):
         refresh_btn.pack(side="right")
 
         self._journal_text = ctk.CTkTextbox(
-            journal_card, font=FONT_MONO, wrap="word",
+            c, font=FONT_MONO, wrap="word",
             fg_color=BG_INPUT, text_color=TEXT_PRIMARY,
             corner_radius=8, border_width=0,
         )
@@ -783,10 +792,10 @@ class TradingBotApp(ctk.CTk):
 
         log_card = _card(tab)
         log_card.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
-        log_card.grid_rowconfigure(1, weight=1)
-        log_card.grid_columnconfigure(0, weight=1)
-
-        hdr = ctk.CTkFrame(log_card, fg_color="transparent")
+        c = log_card.inner
+        c.grid_rowconfigure(1, weight=1)
+        c.grid_columnconfigure(0, weight=1)
+        hdr = ctk.CTkFrame(c, fg_color="transparent")
         hdr.grid(row=0, column=0, sticky="ew", padx=PAD, pady=(PAD, 4))
         _heading(hdr, text="System Logs").pack(side="left")
         self._log_count_label = _label(
@@ -794,7 +803,7 @@ class TradingBotApp(ctk.CTk):
         self._log_count_label.pack(side="right")
 
         self._log_text = ctk.CTkTextbox(
-            log_card, font=FONT_MONO_SM, wrap="word",
+            c, font=FONT_MONO_SM, wrap="word",
             fg_color=BG_INPUT, text_color=TEXT_PRIMARY,
             corner_radius=8, border_width=0,
         )
@@ -872,9 +881,9 @@ class TradingBotApp(ctk.CTk):
         # ──────────────────────────────────────────────────────────────
         s1 = _card(outer)
         s1.pack(fill="x", pady=(0, 10))
-        _heading(s1, text="Trading Mode").pack(anchor="w", padx=PAD, pady=(PAD, 6))
-
-        mode_row = ctk.CTkFrame(s1, fg_color="transparent")
+        c = s1.inner
+        _heading(c, text="Trading Mode").pack(anchor="w", padx=PAD, pady=(PAD, 6))
+        mode_row = ctk.CTkFrame(c, fg_color="transparent")
         mode_row.pack(fill="x", padx=PAD, pady=(0, PAD))
         _label(mode_row, text="Paper (simulated)  /  Live (real money)",
                font=FONT_SMALL, text_color=TEXT_SECONDARY).pack(side="left")
@@ -892,14 +901,15 @@ class TradingBotApp(ctk.CTk):
         self._mode_switch.pack(side="right")
         self._settings_fields["trading_mode"] = self._mode_switch_var
 
-        ctk.CTkFrame(s1, fg_color="transparent", height=PAD).pack(fill="x")
+        ctk.CTkFrame(c, fg_color="transparent", height=PAD).pack(fill="x")
 
         # ──────────────────────────────────────────────────────────────
         # SECTION 2: Risk Management
         # ──────────────────────────────────────────────────────────────
         s2 = _card(outer)
         s2.pack(fill="x", pady=(0, 10))
-        _heading(s2, text="Risk Management").pack(anchor="w", padx=PAD, pady=(PAD, 6))
+        c = s2.inner
+        _heading(c, text="Risk Management").pack(anchor="w", padx=PAD, pady=(PAD, 6))
 
         risk_fields = [
             ("max_position_percent", "Max Position Size (%)", 0.1, 100.0),
@@ -910,25 +920,24 @@ class TradingBotApp(ctk.CTk):
             ("vix_panic_threshold", "VIX Panic Threshold", 1.0, 100.0),
         ]
         for key, label_text, lo, hi in risk_fields:
-            self._add_number_field(s2, key, label_text, lo, hi)
-
+            self._add_number_field(c, key, label_text, lo, hi)
         # Adaptive stop-loss (merged into Risk Management)
-        _label(s2, text="AI uses ATR-based stop-loss instead of fixed %.",
+        _label(c, text="AI uses ATR-based stop-loss instead of fixed %.",
                font=FONT_SMALL, text_color=TEXT_SECONDARY).pack(
             anchor="w", padx=PAD, pady=(8, 4))
-        self._add_toggle_field(s2, "enable_adaptive_stoploss",
+        self._add_toggle_field(c, "enable_adaptive_stoploss",
                                "Enable Adaptive Stop-Loss")
-        self._add_number_field(s2, "adaptive_stoploss_hard_cap_pct",
+        self._add_number_field(c, "adaptive_stoploss_hard_cap_pct",
                                "Hard Cap — Max Stop-Loss (%)", 0.5, 50.0)
-
-        ctk.CTkFrame(s2, fg_color="transparent", height=PAD).pack(fill="x")
+        ctk.CTkFrame(c, fg_color="transparent", height=PAD).pack(fill="x")
 
         # ──────────────────────────────────────────────────────────────
         # SECTION 3: AI Model Pairing
         # ──────────────────────────────────────────────────────────────
         s3 = _card(outer)
         s3.pack(fill="x", pady=(0, 10))
-        _heading(s3, text="AI Model Pairing").pack(anchor="w", padx=PAD, pady=(PAD, 6))
+        c = s3.inner
+        _heading(c, text="AI Model Pairing").pack(anchor="w", padx=PAD, pady=(PAD, 6))
 
         # Display name → API model ID mapping
         self._ai_model_map: dict[str, str] = {
@@ -948,21 +957,22 @@ class TradingBotApp(ctk.CTk):
             ("ai_model_ceo", "CEO Decision Maker"),
         ]
         for key, label_text in ai_roles:
-            self._add_dropdown_field(s3, key, label_text, model_display_names)
-
-        ctk.CTkFrame(s3, fg_color="transparent", height=PAD).pack(fill="x")
+            self._add_dropdown_field(c, key, label_text, model_display_names)
+        ctk.CTkFrame(c, fg_color="transparent", height=PAD).pack(fill="x")
 
         # ──────────────────────────────────────────────────────────────
         # SECTION 4: Ticker Universe
         # ──────────────────────────────────────────────────────────────
         s4 = _card(outer)
         s4.pack(fill="x", pady=(0, 10))
-        _heading(s4, text="Ticker Universe").pack(anchor="w", padx=PAD, pady=(PAD, 6))
-
-        dyn_row = ctk.CTkFrame(s4, fg_color="transparent")
+        c = s4.inner
+        _heading(c, text="Ticker Universe").pack(anchor="w", padx=PAD, pady=(PAD, 6))
+        dyn_row = ctk.CTkFrame(c, fg_color="transparent")
         dyn_row.pack(fill="x", padx=PAD, pady=(0, 6))
-        _label(dyn_row, text="Dynamic Universe (AI auto-select)",
-               font=FONT_SMALL, text_color=TEXT_SECONDARY).pack(side="left")
+        self._dyn_universe_label = _label(
+            dyn_row, text="Dynamic Universe (AI auto-select)",
+            font=FONT_SMALL, text_color=TEXT_SECONDARY)
+        self._dyn_universe_label.pack(side="left")
         self._dyn_universe_var = ctk.StringVar(value="on")
         self._dyn_universe_switch = ctk.CTkSwitch(
             dyn_row, text="", variable=self._dyn_universe_var,
@@ -973,12 +983,16 @@ class TradingBotApp(ctk.CTk):
             command=self._on_dynamic_universe_toggle,
         )
         self._dyn_universe_switch.pack(side="right")
+        # Label brightens on switch hover (not on toggle state)
+        self._dyn_universe_switch.bind(
+            "<Enter>", lambda e: self._dyn_universe_label.configure(text_color=TEXT_HEADING))
+        self._dyn_universe_switch.bind(
+            "<Leave>", lambda e: self._dyn_universe_label.configure(text_color=TEXT_SECONDARY))
         self._settings_fields["enable_dynamic_universe"] = self._dyn_universe_var
 
-        self._add_number_field(s4, "dynamic_universe_size",
+        self._add_number_field(c, "dynamic_universe_size",
                                "Universe Size (tickers)", 1, 100)
-
-        ticker_row = ctk.CTkFrame(s4, fg_color="transparent")
+        ticker_row = ctk.CTkFrame(c, fg_color="transparent")
         ticker_row.pack(fill="x", padx=PAD, pady=(0, 4))
         self._fixed_tickers_label = _label(
             ticker_row, text="Fixed Tickers", font=FONT_SMALL,
@@ -994,6 +1008,7 @@ class TradingBotApp(ctk.CTk):
         # Input entry for adding new tickers
         self._fixed_tickers_entry = ctk.CTkEntry(
             ticker_row, placeholder_text="Type ticker + Enter…",
+            placeholder_text_color=TEXT_SECONDARY,
             font=FONT_MONO, fg_color=BG_INPUT, text_color=TEXT_PRIMARY,
             border_color=BORDER_SUBTLE, corner_radius=6, height=32,
             state="disabled",
@@ -1018,39 +1033,37 @@ class TradingBotApp(ctk.CTk):
 
         self._settings_fields["fixed_tickers"] = self._fixed_tickers_entry
 
-        _label(s4, text="Universe Filtering (applied by Opus CEO)",
+        _label(c, text="Universe Filtering (applied by CEO)",
                font=FONT_SMALL, text_color=ACCENT_CYAN).pack(
             anchor="w", padx=PAD, pady=(8, 4))
-        self._add_number_field(s4, "universe_min_market_cap_usd",
+        self._add_number_field(c, "universe_min_market_cap_usd",
                                "Min Market Cap ($)", 0, 1e15)
-        self._add_number_field(s4, "universe_min_volume_usd",
+        self._add_number_field(c, "universe_min_volume_usd",
                                "Min Daily Volume ($)", 0, 1e12)
-
-        ctk.CTkFrame(s4, fg_color="transparent", height=PAD).pack(fill="x")
+        ctk.CTkFrame(c, fg_color="transparent", height=PAD).pack(fill="x")
 
         # ──────────────────────────────────────────────────────────────
         # SECTION 5: Chart Settings
         # ──────────────────────────────────────────────────────────────
         s5 = _card(outer)
         s5.pack(fill="x", pady=(0, 10))
-        _heading(s5, text="Chart Settings").pack(anchor="w", padx=PAD, pady=(PAD, 6))
-
+        c = s5.inner
+        _heading(c, text="Chart Settings").pack(anchor="w", padx=PAD, pady=(PAD, 6))
         tf_options = ["1min", "5min", "15min", "1h", "1d", "1w", "1mo", "1y"]
-        self._add_dropdown_field(s5, "default_chart_timeframe",
+        self._add_dropdown_field(c, "default_chart_timeframe",
                                  "Default Timeframe", tf_options)
-        self._add_number_field(s5, "default_candle_count",
+        self._add_number_field(c, "default_candle_count",
                                "Candle Count", 10, 1000)
-
-        ctk.CTkFrame(s5, fg_color="transparent", height=PAD).pack(fill="x")
+        ctk.CTkFrame(c, fg_color="transparent", height=PAD).pack(fill="x")
 
         # ──────────────────────────────────────────────────────────────
         # SECTION 6: Timezone
         # ──────────────────────────────────────────────────────────────
         s6 = _card(outer)
         s6.pack(fill="x", pady=(0, 10))
-        _heading(s6, text="Display Timezone").pack(anchor="w", padx=PAD, pady=(PAD, 6))
-
-        tz_row = ctk.CTkFrame(s6, fg_color="transparent")
+        c = s6.inner
+        _heading(c, text="Display Timezone").pack(anchor="w", padx=PAD, pady=(PAD, 6))
+        tz_row = ctk.CTkFrame(c, fg_color="transparent")
         tz_row.pack(fill="x", padx=PAD, pady=(0, PAD))
         _label(tz_row, text="Timezone", font=FONT_SMALL,
                text_color=TEXT_SECONDARY).pack(side="left")
@@ -1080,6 +1093,7 @@ class TradingBotApp(ctk.CTk):
             dropdown_text_color=TEXT_PRIMARY,
             dropdown_hover_color=BG_HOVER, corner_radius=6,
             state="disabled",
+            command=self._on_timezone_changed,
         )
         self._tz_combo.pack(side="right")
         # Make timezone combo read-only (prevent text editing)
@@ -1089,7 +1103,7 @@ class TradingBotApp(ctk.CTk):
             pass
         self._settings_fields["display_timezone"] = self._tz_var
 
-        _label(s6, text="Type any pytz timezone name or pick from the list above.",
+        _label(c, text="Type any pytz timezone name or pick from the list above.",
                font=("Pretendard", 10), text_color=TEXT_SECONDARY).pack(
             anchor="w", padx=PAD, pady=(0, PAD))
 
@@ -1098,9 +1112,9 @@ class TradingBotApp(ctk.CTk):
         # ──────────────────────────────────────────────────────────────
         s7 = _card(outer)
         s7.pack(fill="x", pady=(0, 10))
-        _heading(s7, text="Advanced Thresholds").pack(
+        c = s7.inner
+        _heading(c, text="Advanced Thresholds").pack(
             anchor="w", padx=PAD, pady=(PAD, 6))
-
         adv_fields = [
             ("price_change_threshold_pct", "Price Change Alert (%)", 0.01, 100.0),
             ("volume_spike_multiplier", "Volume Spike Multiplier", 1.0, 100.0),
@@ -1113,14 +1127,12 @@ class TradingBotApp(ctk.CTk):
             ("low_reliability_weight", "Low Reliability Weight (0-1)", 0.0, 1.0),
         ]
         for key, label_text, lo, hi in adv_fields:
-            self._add_number_field(s7, key, label_text, lo, hi)
-
+            self._add_number_field(c, key, label_text, lo, hi)
         # Strategy intervals
-        self._add_number_field(s7, "strategy_update_interval_min",
+        self._add_number_field(c, "strategy_update_interval_min",
                                "Strategy Review Interval (min)", 1, 1440)
-        self._add_number_field(s7, "grok_scan_interval_min",
+        self._add_number_field(c, "grok_scan_interval_min",
                                "Scan Interval (min)", 1, 1440)
-
         # Toggles
         for toggle_key, toggle_label in [
             ("allow_extended_hours", "Allow Extended Hours"),
@@ -1128,21 +1140,20 @@ class TradingBotApp(ctk.CTk):
             ("db_backup_enabled", "Database Backup"),
             ("social_noise_filter_enabled", "Social Noise Filter"),
         ]:
-            self._add_toggle_field(s7, toggle_key, toggle_label)
-
-        ctk.CTkFrame(s7, fg_color="transparent", height=PAD).pack(fill="x")
+            self._add_toggle_field(c, toggle_key, toggle_label)
+        ctk.CTkFrame(c, fg_color="transparent", height=PAD).pack(fill="x")
 
         # ──────────────────────────────────────────────────────────────
         # SECTION 8: API Key Input (hybrid) + Read-only status
         # ──────────────────────────────────────────────────────────────
         s8 = _card(outer)
         s8.pack(fill="x", pady=(0, 10))
-        _heading(s8, text="API Keys (Hybrid: input here → stored on server)").pack(
+        c = s8.inner
+        _heading(c, text="API Keys (Hybrid: input here → stored on server)").pack(
             anchor="w", padx=PAD, pady=(PAD, 6))
-        _label(s8, text="Keys are sent to the server and erased from client memory.",
+        _label(c, text="Keys are sent to the server and erased from client memory.",
                font=FONT_SMALL, text_color=TEXT_SECONDARY).pack(
             anchor="w", padx=PAD, pady=(0, 8))
-
         self._api_key_entries: dict[str, ctk.CTkEntry] = {}
         for key_name, display_label in [
             ("ANTHROPIC_API_KEY", "Anthropic (Claude)"),
@@ -1151,7 +1162,7 @@ class TradingBotApp(ctk.CTk):
             ("APCA_API_KEY_ID", "Alpaca Key ID"),
             ("APCA_API_SECRET_KEY", "Alpaca Secret"),
         ]:
-            r = ctk.CTkFrame(s8, fg_color="transparent")
+            r = ctk.CTkFrame(c, fg_color="transparent")
             r.pack(fill="x", padx=PAD, pady=2)
             _label(r, text=display_label, font=FONT_SMALL,
                    text_color=TEXT_SECONDARY, width=140).pack(side="left")
@@ -1164,7 +1175,7 @@ class TradingBotApp(ctk.CTk):
             entry.pack(side="left", fill="x", expand=True, padx=(8, 0))
             self._api_key_entries[key_name] = entry
 
-        key_btn_row = ctk.CTkFrame(s8, fg_color="transparent")
+        key_btn_row = ctk.CTkFrame(c, fg_color="transparent")
         key_btn_row.pack(fill="x", padx=PAD, pady=(8, 4))
         self._submit_keys_btn = ctk.CTkButton(
             key_btn_row, text="🔑 Apply Keys to Server", width=180, height=30,
@@ -1175,9 +1186,8 @@ class TradingBotApp(ctk.CTk):
         self._submit_keys_btn.pack(side="left")
 
         # Key status (read-only)
-        _label(s8, text="Key Status (read-only)", font=FONT_SMALL,
+        _label(c, text="Key Status (read-only)", font=FONT_SMALL,
                text_color=TEXT_SECONDARY).pack(anchor="w", padx=PAD, pady=(8, 4))
-
         self._key_status_labels: dict[str, ctk.CTkLabel] = {}
         for key_name, display_label in [
             ("ANTHROPIC_API_KEY", "Anthropic"),
@@ -1186,7 +1196,7 @@ class TradingBotApp(ctk.CTk):
             ("APCA_API_KEY_ID", "Alpaca ID"),
             ("APCA_API_SECRET_KEY", "Alpaca Secret"),
         ]:
-            r = ctk.CTkFrame(s8, fg_color="transparent")
+            r = ctk.CTkFrame(c, fg_color="transparent")
             r.pack(fill="x", padx=PAD, pady=1)
             _label(r, text=f"{display_label}:", font=FONT_SMALL,
                    text_color=TEXT_SECONDARY, width=100).pack(side="left")
@@ -1195,7 +1205,7 @@ class TradingBotApp(ctk.CTk):
             status_lbl.pack(side="left", padx=(8, 0))
             self._key_status_labels[key_name] = status_lbl
 
-        ctk.CTkFrame(s8, fg_color="transparent", height=PAD).pack(fill="x")
+        ctk.CTkFrame(c, fg_color="transparent", height=PAD).pack(fill="x")
 
         # Bottom spacer for overall settings content
         ctk.CTkFrame(outer, fg_color="transparent", height=40).pack(fill="x")
@@ -1323,11 +1333,15 @@ class TradingBotApp(ctk.CTk):
             fg_color=BG_INPUT, progress_color=ACCENT_CYAN,
             button_color=TEXT_SECONDARY, button_hover_color=TEXT_PRIMARY,
             state="disabled",
-            command=lambda lb=lbl: self.after(
-                50, lambda: lb.configure(text_color=TEXT_HEADING
-                                         if var.get() == "on" else TEXT_SECONDARY)),
         )
         switch.pack(side="right")
+        # Label brightens on switch hover (not on toggle state)
+        def _on_enter(e, lb=lbl):
+            lb.configure(text_color=TEXT_HEADING)
+        def _on_leave(e, lb=lbl):
+            lb.configure(text_color=TEXT_SECONDARY)
+        switch.bind("<Enter>", _on_enter)
+        switch.bind("<Leave>", _on_leave)
         self._settings_fields[key] = (var, switch)
 
     # ── Settings tab: edit-mode toggle ──
@@ -1386,9 +1400,16 @@ class TradingBotApp(ctk.CTk):
             entry.configure(state=new_state)
         self._submit_keys_btn.configure(state=new_state)
 
+        # When entering edit mode, rebuild ticker tags so X buttons become enabled
+        if self._settings_edit_mode:
+            self._rebuild_ticker_tags()
         # When locking, revert to last saved values from server
         if not self._settings_edit_mode:
             self._load_settings_from_server()
+
+    def _on_timezone_changed(self, choice: str) -> None:
+        """Force combobox display update after selection."""
+        self._tz_var.set(choice)
 
     def _on_dynamic_universe_toggle(self) -> None:
         """Disable Fixed Tickers entry when Dynamic Universe is on."""
@@ -1406,8 +1427,7 @@ class TradingBotApp(ctk.CTk):
             w.destroy()
         self._ticker_tag_widgets.clear()
 
-        can_delete = (self._settings_edit_mode
-                      and self._dyn_universe_var.get() != "on")
+        can_delete = self._settings_edit_mode
 
         for sym in self._ticker_tags:
             tag = ctk.CTkFrame(self._ticker_tags_frame, fg_color="#2b3a42",

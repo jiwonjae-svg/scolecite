@@ -34,7 +34,7 @@
 - [MCP Tools](#-mcp-tools)
 - [API Reference](#-api-reference)
 - [Desktop Client](#-desktop-client)
-- [Oracle Cloud VPS Deployment](#-oracle-cloud-vps-production-deployment)
+- [Railway Production Deployment](#-railway-production-deployment)
 - [Tech Stack](#-tech-stack)
 - [License](#-license)
 
@@ -51,7 +51,7 @@ Project Scolecite is a full-stack Python autonomous trading system powered by a 
 | 👔 **Decide** | Opus CEO (`claude-opus-4`) | Review hypotheses, approve/reject, execute via MCP tools |
 | 🔄 **Correct** | Opus CEO | Review past trades, write self-correction improvements |
 
-The system is split into a **FastAPI server** (deployable to Oracle Cloud VPS) and a **customtkinter desktop client** connected via REST + SSE.
+The system is split into a **FastAPI server** (deployable to Railway) and a **customtkinter desktop client** connected via REST + SSE.
 
 ---
 
@@ -480,110 +480,49 @@ The customtkinter desktop client features a **dark navy professional theme** wit
 
 ---
 
-## Oracle Cloud VPS Production Deployment
+## Railway Production Deployment
 
-Production deployment on **Oracle Cloud Always Free Ampere A1 Compute** (4 OCPU, 24 GB RAM, 200 GB Block Volume). Zero infrastructure cost.
+Production deployment on [Railway](https://railway.app/): connect the GitHub repo, add PostgreSQL, set env vars, and deploy. HTTPS and a public URL are provided by Railway.
 
 ### Target Stack
 
 | Component | Technology |
 |-----------|------------|
-| **Compute** | Oracle Cloud VM.Standard.A1.Flex (ARM64) |
-| **OS** | Ubuntu 24.04 LTS |
-| **Database** | PostgreSQL 16 (Docker container) |
-| **Reverse Proxy** | Nginx + Let's Encrypt SSL |
-| **Secrets** | `.env` file (no Secret Manager) |
-| **Logging** | stdout → journalctl |
-| **Auto-start** | systemd (`scolecite.service`) |
-
-### Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│              Oracle Cloud Always Free A1 Instance                │
-│              Ubuntu 24.04 LTS (ARM64)                            │
-│              4 OCPU · 24 GB RAM · 200 GB Disk                    │
-│                                                                  │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │  UFW (22, 80, 443) · Fail2Ban · unattended-upgrades        │  │
-│  └────────────────────────────────────────────────────────────┘  │
-│                                                                  │
-│  ┌──────────────┐                                                │
-│  │    Nginx     │  :80 → :443 redirect · Let's Encrypt           │
-│  │  (host)      │  :443 → proxy_pass http://127.0.0.1:8000       │
-│  └──────┬───────┘                                                │
-│         │                                                        │
-│  ┌──────▼─────────────────────────────────────────────────────┐  │
-│  │  Docker Compose                                             │  │
-│  │  ┌────────────────────┐   ┌──────────────────────────────┐  │  │
-│  │  │ scolecite-server   │   │ scolecite-db                 │  │  │
-│  │  │ FastAPI + Gunicorn │──▶│ PostgreSQL 16                │  │  │
-│  │  │ 4 workers :8000    │   │ :5432 (internal)             │  │  │
-│  │  └────────────────────┘   └──────────────────────────────┘  │  │
-│  └─────────────────────────────────────────────────────────────┘  │
-│                                                                  │
-│  systemd: scolecite.service (boot auto-start)                     │
-└──────────────────────────────────────────────────────────────────┘
-```
+| **Platform** | Railway |
+| **App** | Docker (root `Dockerfile`) |
+| **Database** | Railway PostgreSQL (add as a service) |
+| **Secrets** | Railway environment variables |
+| **HTTPS** | Railway-managed |
 
 ### Quick Start
 
-1. **Provision** an Oracle Cloud Always Free A1 instance (Ubuntu 24.04).
-2. **SSH** into the server and follow [DEPLOYMENT.md](DEPLOYMENT.md) for step-by-step setup.
-3. **Deploy**:
-   ```bash
-   cd /opt/scolecite
-   cp .env.example .env   # Edit with API keys
-   docker compose up -d --build
-   ./deploy.sh            # Or: git pull + rebuild + restart
-   ```
-4. **First boot checklist**: See [DEPLOYMENT.md § First Boot Checklist](DEPLOYMENT.md#9-first-boot-checklist).
+1. Create a [Railway](https://railway.app) account and **New Project**.
+2. **Deploy from GitHub** and select this repository.
+3. Add **PostgreSQL** (New → Database → PostgreSQL) and link `DATABASE_URL` to the web service.
+4. In the web service **Variables**, set:
+   - `DATABASE_URL` (from PostgreSQL; use `postgresql+asyncpg://...` if your stack expects asyncpg)
+   - `ANTHROPIC_API_KEY`, `XAI_GROK_API_KEY`
+   - `APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`
+5. **Generate Domain** in Settings → Networking to get a public HTTPS URL.
+6. Point the desktop client’s Server URL to that domain.
 
-### Key Files
-
-| File | Purpose |
-|------|---------|
-| `DEPLOYMENT.md` | Full deployment guide (Oracle Cloud, UFW, Fail2Ban, Nginx, SSL) |
-| `deploy/nginx/scolecite.conf` | Nginx reverse proxy config |
-| `deploy/scolecite.service` | systemd unit for docker-compose auto-start |
-| `deploy.sh` | Zero-downtime deploy (git pull → build → restart) |
-
-### Zero-Downtime Deploy
-
-```bash
-cd /opt/scolecite
-./deploy.sh              # Full: git pull + build + restart
-./deploy.sh --no-pull    # Rebuild from local code only
-./deploy.sh --status     # Show container status
-./deploy.sh --logs       # Tail logs
-./deploy.sh --backup-db  # Backup PostgreSQL before deploy
-```
+Full steps, env var reference, and troubleshooting: [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ### Health Checks
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /health` | Liveness (no DB) |
+| `GET /health` | Liveness |
 | `GET /ready` | Readiness (DB connected) |
 
 ```bash
-curl http://localhost:8000/health   # → {"status":"ok","mode":"paper"}
-curl http://localhost:8000/ready    # → {"status":"ready","db":"connected"}
+curl https://YOUR_RAILWAY_URL/health
+curl https://YOUR_RAILWAY_URL/ready
 ```
-
-### Environment Variables
-
-API keys and config live in `.env` (never committed). Required:
-
-- `ANTHROPIC_API_KEY`, `XAI_GROK_API_KEY`
-- `APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`
-- `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` (for docker-compose)
-
-`DATABASE_URL` is auto-set by docker-compose to point at the PostgreSQL container.
 
 ### Cost
 
-**$0/month** for infrastructure (Always Free tier). Only AI API usage (Anthropic, xAI) incurs cost, tracked in-app via `/api/cost`.
+Railway charges for usage (compute, DB, egress). See [Railway Pricing](https://railway.app/pricing). AI API usage (Anthropic, xAI) is separate and tracked in-app via `/api/cost`.
 
 ---
 
@@ -598,7 +537,7 @@ API keys and config live in `.env` (never committed). Required:
 | **Database** | SQLite (dev) / PostgreSQL (prod, docker-compose) · aiosqlite · asyncpg |
 | **Analysis** | pandas · numpy · ta (technical analysis) |
 | **Resilience** | tenacity (retry) · structlog (sanitized logging) |
-| **Deployment** | Docker · docker-compose · Nginx · systemd · Oracle Cloud Always Free A1 |
+| **Deployment** | Docker · Railway (PostgreSQL, env vars, HTTPS) |
 
 ---
 
